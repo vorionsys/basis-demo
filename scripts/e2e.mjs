@@ -1,13 +1,15 @@
 /**
  * End-to-end drive of the demo API — the same path the UI takes.
- * Boots `next start`, runs the full Quarter-Close scenario (deny path),
- * asserts the frozen (decision, reason) sequence, the s3b→s3 link, the
- * fail-closed refusals, and finally verifies the chain with @vorionsys/verify.
+ * The server is STATELESS: the chain travels with every request and is
+ * cryptographically re-verified before each append. This script asserts the
+ * frozen (decision, reason) sequence, the s3b→s3 link, out-of-order and
+ * pre-expiry refusals, rejection of a tampered submitted chain, and finally
+ * verifies the result with @vorionsys/verify.
  *
  * Run after `npm run build`:  node scripts/e2e.mjs
  * NOTE: waits the honest 15s credential TTL — total runtime ~25s.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { verifyChain } from "@vorionsys/verify";
 
 const PORT = 3123;
@@ -32,9 +34,15 @@ let serverOut = "";
 server.stdout.on("data", (d) => (serverOut += d));
 server.stderr.on("data", (d) => (serverOut += d));
 
+// On Windows, killing the npx wrapper orphans the actual server — kill the tree.
+const stopServer = () => {
+  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"]);
+  else server.kill();
+};
+
 const die = (msg, code = 1) => {
   console.error(`FAIL: ${msg}`);
-  server.kill();
+  stopServer();
   process.exit(code);
 };
 
@@ -49,35 +57,44 @@ for (let i = 0; i < 60; i++) {
 }
 if (!ready) die(`server never became ready.\n${serverOut}`);
 
-const sessionId = "e2e-" + Math.random().toString(36).slice(2);
+const keys = await (await fetch(`${BASE}/keys.json`)).json();
+
+let chain = null; // the client-held session
 const post = async (body, expectStatus = 200) => {
   const res = await fetch(`${BASE}/api/run`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessionId, ...body }),
+    body: JSON.stringify({ chain, ...body }),
   });
   const data = await res.json();
   if (res.status !== expectStatus) die(`expected HTTP ${expectStatus}, got ${res.status}: ${JSON.stringify(data)}`);
   return data;
 };
+const advance = (resp) => { chain = resp.chain; return resp; };
 
-await post({ op: "start" });
-const keys = await (await fetch(`${BASE}/keys.json`)).json();
-
-// s5 before s4 must be refused (fail-closed sequencing)
+// out-of-order: s5 with an empty chain must be refused
 await post({ op: "step", key: "s5" }, 409);
-console.log("✓ s5 refused before s4 (409)");
+console.log("✓ s5 refused out of order (409)");
 
-await post({ op: "step", key: "s1" });
-await post({ op: "step", key: "s2" });
-const s3 = await post({ op: "step", key: "s3" });
+advance(await post({ op: "step", key: "s1" }));
+advance(await post({ op: "step", key: "s2" }));
+const s3 = advance(await post({ op: "step", key: "s3" }));
 if (s3.record.verdict.decision !== "escalate") die("s3 did not escalate");
-const s3b = await post({ op: "resolve", resolution: "deny" });
+
+// tampered submitted chain must be rejected by server-side re-verification
+const saved = chain;
+chain = JSON.parse(JSON.stringify(saved));
+chain.records[1].action.paramsHash = chain.records[1].action.paramsHash.replace(/.$/, (c) => (c === "0" ? "1" : "0"));
+await post({ op: "resolve", resolution: "deny" }, 409);
+chain = saved;
+console.log("✓ tampered submitted chain rejected (409, server re-verifies)");
+
+const s3b = advance(await post({ op: "resolve", resolution: "deny" }));
 if (s3b.record.verdict.linksTo !== s3.record.id) die("s3b does not link to s3");
 console.log("✓ s3 escalated, s3b links to it");
 
-const s4 = await post({ op: "step", key: "s4" });
-if (!s4.credentialExpiresAtMs) die("s4 did not arm the credential TTL");
+const s4 = advance(await post({ op: "step", key: "s4" }));
+if (!s4.credentialExpiresAtMs) die("s4 did not report the credential TTL");
 
 // s5 before expiry must be refused
 await post({ op: "step", key: "s5" }, 409);
@@ -87,8 +104,7 @@ const waitMs = s4.credentialExpiresAtMs - Date.now() + 500;
 console.log(`  waiting ${(waitMs / 1000).toFixed(1)}s for the honest credential TTL…`);
 await new Promise((r) => setTimeout(r, waitMs));
 
-const s5 = await post({ op: "step", key: "s5" });
-const chain = s5.chain;
+advance(await post({ op: "step", key: "s5" }));
 
 // frozen sequence
 const actual = chain.records.map((r) => [r.verdict.decision, r.verdict.reason]);
@@ -96,6 +112,10 @@ if (JSON.stringify(actual) !== JSON.stringify(EXPECTED)) {
   die(`chain sequence mismatch:\nexpected ${JSON.stringify(EXPECTED)}\nactual   ${JSON.stringify(actual)}`);
 }
 console.log("✓ chain matches the frozen 6-record sequence (deny path)");
+
+// scenario complete — a 7th step must be refused
+await post({ op: "step", key: "s1" }, 409);
+console.log("✓ completed scenario refuses further steps (409)");
 
 // s5 credential state + latency invariant
 const last = chain.records[5];
@@ -109,6 +129,6 @@ const result = verifyChain(chain, keys);
 if (!result.valid) die(`chain does not verify: ${JSON.stringify(result.firstFailure)}`);
 console.log(`✓ chain verifies (${result.records.length} records, signer ${result.signers.join(",")})`);
 
-server.kill();
+stopServer();
 console.log("\nE2E PASS");
 process.exit(0);

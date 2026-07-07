@@ -51,7 +51,12 @@ basis-spec (standard)
 The demo imports the same published packages anyone can `npm install` — that is the
 credibility mechanism. Gate evaluation and Ed25519 signing run server-side; the browser
 only renders and *re-verifies* (every appended record re-verifies the whole chain
-in-browser with `@vorionsys/verify` before it is drawn). Standard:
+in-browser with `@vorionsys/verify` before it is drawn).
+
+**The server holds no session state.** Your chain travels with every request and is
+cryptographically re-verified server-side before each append — the chain *is* the
+session. Tamper with it mid-run and the server refuses with the exact failing record
+(the e2e asserts this). Standard:
 [`basis-spec`](https://github.com/vorionsys/basis-spec) · [vorion.org](https://vorion.org)
 
 ## Development

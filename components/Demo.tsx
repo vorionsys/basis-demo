@@ -45,7 +45,9 @@ export default function Demo() {
   const [invariantsOk, setInvariantsOk] = useState<boolean | null>(null);
 
   const keysRef = useRef<KeysFile | null>(null);
-  const sessionRef = useRef<string>("");
+  /** The chain we hold IS the session — the server is stateless and re-verifies
+   *  this cryptographically on every request before appending. */
+  const chainRef = useRef<ChainFile | null>(null);
   const runIdRef = useRef(0); // invalidates in-flight runs on Replay
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -64,7 +66,7 @@ export default function Demo() {
     const res = await fetch("/api/run", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: sessionRef.current, ...body }),
+      body: JSON.stringify({ chain: chainRef.current, ...body }),
     });
     const data = (await res.json()) as StepResponse;
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
@@ -76,6 +78,7 @@ export default function Demo() {
     const keys = keysRef.current;
     if (!keys) throw new Error("keys.json not loaded");
     const result = verifyChain(c, keys);
+    chainRef.current = c;
     setChain(c);
     setLiveResult(result);
     if (!result.valid) throw new Error(`in-browser verification failed: ${result.firstFailure?.message}`);
@@ -93,10 +96,9 @@ export default function Demo() {
     setSecondsLeft(null);
     setErrorMsg(null);
     setInvariantsOk(null);
-    sessionRef.current = crypto.randomUUID();
+    chainRef.current = null;
 
     try {
-      await post({ op: "start" });
       keysRef.current = (await (await fetch("/keys.json")).json()) as KeysFile;
 
       let expiresAtMs = 0;
