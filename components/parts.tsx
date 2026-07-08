@@ -96,21 +96,20 @@ export function ChainStrip({
 }
 
 export function EscalationModal({
-  amount,
+  subject,
+  detail,
   onResolve,
 }: {
-  amount: string;
+  subject: string;
+  detail: string;
   onResolve: (r: "approve" | "deny") => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="w-full max-w-md rounded-xl border border-[#d29922] bg-[#161b22] p-6 shadow-2xl">
         <div className="mb-2 text-xs font-bold tracking-wide text-[#d29922]">ESCALATION — HUMAN DECISION REQUIRED</div>
-        <h2 className="mb-1 text-lg font-semibold text-[#e6edf3]">Vendor payment {amount}</h2>
-        <p className="mb-5 text-sm text-[#8b949e]">
-          The agent&apos;s tier-2 payment cap is $10,000. The gate escalated deterministically —
-          <span className="text-[#e6edf3]"> no model chose this</span>. Your decision is signed into the chain either way.
-        </p>
+        <h2 className="mb-1 text-lg font-semibold text-[#e6edf3]">{subject}</h2>
+        <p className="mb-5 text-sm text-[#8b949e]">{detail}</p>
         <div className="flex gap-3">
           <button
             onClick={() => onResolve("deny")}
@@ -130,7 +129,7 @@ export function EscalationModal({
   );
 }
 
-export function CountdownPill({ secondsLeft }: { secondsLeft: number }) {
+export function CountdownPill({ secondsLeft, credentialId }: { secondsLeft: number; credentialId: string }) {
   const expired = secondsLeft <= 0;
   return (
     <div
@@ -139,7 +138,7 @@ export function CountdownPill({ secondsLeft }: { secondsLeft: number }) {
       }`}
     >
       {expired ? (
-        <>credential cred_9f3a EXPIRED — effective authority is now zero</>
+        <>credential {credentialId} EXPIRED — effective authority is now zero</>
       ) : (
         <>
           credential TTL: <span className="font-mono">{secondsLeft}s</span> — when this hits zero the agent&apos;s

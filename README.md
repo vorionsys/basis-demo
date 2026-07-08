@@ -7,7 +7,16 @@
 
 Live at **[demo.basis.vorion.org](https://demo.basis.vorion.org)** (no login, ~2 minutes, phone-friendly).
 
-## The five actions
+## Three scenarios, one gate
+
+| Scenario | Vertical | The arc |
+|---|---|---|
+| **Quarter-Close Agent** (flagship) | Finance | $250k payment escalates (tier-2 cap $10k) → operator denies → off-list vendor call denied → a **live 15s credential TTL** runs out and the same capability allowed at step 2 is denied at step 5 |
+| **Incident-Response Agent** | Cybersecurity | Isolating 1 host is in-authority; isolating 250 escalates (blast-radius cap) → incident commander **approves** → off-list firewall push denied → a **revoked** credential stops a disk wipe |
+| **Patient-Records Agent** | Healthcare | 5,000-record bulk export escalates (tier-3 cap 100) → privacy officer denies → external analytics vendor refused → an **unenrolled** agent (`credential: none`) gets zero authority |
+
+Same gate, same record format, same verifier — only the policy document and script change.
+The flagship Quarter-Close table (SPEC §2):
 
 | # | Action | Verdict | Reason |
 |---|--------|---------|--------|
