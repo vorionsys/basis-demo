@@ -5,7 +5,7 @@
 
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-Live at **[demo.vorion.org](https://demo.vorion.org)** (no login, ~2 minutes, phone-friendly).
+Live at **[demo.basis.vorion.org](https://demo.basis.vorion.org)** (no login, ~2 minutes, phone-friendly).
 
 ## The five actions
 
