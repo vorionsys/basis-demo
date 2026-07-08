@@ -7,13 +7,16 @@
 
 Live at **[demo.basis.vorion.org](https://demo.basis.vorion.org)** (no login, ~2 minutes, phone-friendly).
 
-## Three scenarios, one gate
+## Six scenarios, one gate
 
-| Scenario | Vertical | The arc |
+| Scenario | Vertical | What it uniquely shows |
 |---|---|---|
-| **Quarter-Close Agent** (flagship) | Finance | $250k payment escalates (tier-2 cap $10k) → operator denies → off-list vendor call denied → a **live 15s credential TTL** runs out and the same capability allowed at step 2 is denied at step 5 |
-| **Incident-Response Agent** | Cybersecurity | Isolating 1 host is in-authority; isolating 250 escalates (blast-radius cap) → incident commander **approves** → off-list firewall push denied → a **revoked** credential stops a disk wipe |
-| **Patient-Records Agent** | Healthcare | 5,000-record bulk export escalates (tier-3 cap 100) → privacy officer denies → external analytics vendor refused → an **unenrolled** agent (`credential: none`) gets zero authority |
+| **Quarter-Close Agent** (flagship) | Finance | Tier cap escalation, operator deny, and a **live 15s credential TTL** — the same capability allowed at step 2 is denied at step 5 |
+| **Incident-Response Agent** | Cybersecurity | The **approve** path, a blast-radius cap (1 host fine, 250 escalates), and a **revoked** credential stopping a disk wipe |
+| **Patient-Records Agent** | Healthcare | A privacy-officer denial of a bulk export and an **unenrolled** agent (`credential: none`) getting zero authority |
+| **Contract-Award Agent** | Gov Contracts | **Dual control**: a $1.8M award needs two signed approvals — the 1-of-2 vote is `escalate/HUMAN_APPROVED`, visibly still pending — plus `CAPABILITY_NOT_GRANTED` on a novation attempt |
+| **Loan-Origination Agent** | Lending | **No human at all**: a prohibited decision basis (applicant zip code) denied by param policy — the fair-lending check — and a **chain-derived velocity cap** stopping the 4th decision in a minute |
+| **Grid-Ops Agent** | Energy | Switching caps under storm load, an ungranted firmware push, and a lapsed shift credential |
 
 Same gate, same record format, same verifier — only the policy document and script change.
 The flagship Quarter-Close table (SPEC §2):

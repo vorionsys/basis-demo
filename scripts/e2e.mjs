@@ -56,6 +56,45 @@ const ORACLE = {
       ["deny", "CREDENTIAL_EXPIRED"],
     ],
   },
+  "contract-award": {
+    steps: ["g1", "g2", "g3", "resolve", "resolve", "g4"], // dual-control: two approvals
+    resolution: "approve",
+    hasTtl: false,
+    expected: [
+      ["allow", "WITHIN_AUTHORITY"],
+      ["allow", "WITHIN_AUTHORITY"],
+      ["escalate", "TIER_CAP_EXCEEDED"],
+      ["escalate", "HUMAN_APPROVED"], // 1 of 2 — signed vote, still pending
+      ["allow", "HUMAN_APPROVED"], // 2 of 2 — quorate
+      ["deny", "CAPABILITY_NOT_GRANTED"],
+    ],
+  },
+  "loan-origination": {
+    steps: ["l1", "l2", "l3", "l4", "l5", "l6"], // no operator at all
+    resolution: "deny",
+    hasTtl: false,
+    expected: [
+      ["allow", "WITHIN_AUTHORITY"],
+      ["allow", "WITHIN_AUTHORITY"],
+      ["deny", "PARAM_NOT_ALLOWLISTED"], // zip code as decision basis
+      ["allow", "WITHIN_AUTHORITY"],
+      ["allow", "WITHIN_AUTHORITY"],
+      ["deny", "RATE_LIMIT_EXCEEDED"], // 4th decision inside the window
+    ],
+  },
+  "grid-ops": {
+    steps: ["e1", "e2", "e3", "resolve", "e4", "e5"],
+    resolution: "deny",
+    hasTtl: false,
+    expected: [
+      ["allow", "WITHIN_AUTHORITY"],
+      ["allow", "WITHIN_AUTHORITY"],
+      ["escalate", "TIER_CAP_EXCEEDED"],
+      ["deny", "HUMAN_DENIED"],
+      ["deny", "CAPABILITY_NOT_GRANTED"],
+      ["deny", "CREDENTIAL_EXPIRED"],
+    ],
+  },
 };
 
 const server = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["next", "start", "-p", String(PORT)], {

@@ -136,8 +136,12 @@ export function resolveEscalation(scenarioId: unknown, chainInput: unknown, reso
   const records = acceptSubmittedChain(def, chainInput);
   const step = expectNext(def, records, "resolve");
 
-  const resolved = new Set(records.map((r) => r.verdict.linksTo).filter(Boolean));
-  const pending = records.find((r) => r.verdict.decision === "escalate" && !resolved.has(r.id));
+  // An escalation is CLOSED only by a linked allow/deny; linked escalate
+  // records are quorum approval votes and leave it pending.
+  const closed = new Set(
+    records.filter((r) => r.verdict.linksTo && r.verdict.decision !== "escalate").map((r) => r.verdict.linksTo),
+  );
+  const pending = records.find((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null && !closed.has(r.id));
   if (!pending) throw new HttpError(409, "no pending escalation to resolve");
 
   const gate = new GateChain({ policy: def.policy, signer, resume: records });

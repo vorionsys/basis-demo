@@ -39,6 +39,10 @@ export interface ScenarioStep {
     params: Record<string, unknown>; // synthetic data only
   } | null;
   resolves?: string;
+  /** For resolution steps only: resolve automatically with this choice instead
+   *  of showing the operator modal (used to script the non-final approval of a
+   *  quorum — e.g. "the contracting officer approved earlier, 1 of 2"). */
+  autoResolution?: "approve" | "deny";
   /** Scripted credential state for this step (defaults to "active" / TTL-derived). */
   credentialStatus?: "active" | "expired" | "revoked" | "none";
   expect: StepExpectation;
@@ -323,9 +327,256 @@ const patientRecords: ScenarioDef = {
   ],
 };
 
+/* ── 4. Contract Award (govcon — dual-control quorum) ───────────────────── */
+
+const contractAward: ScenarioDef = {
+  id: "contract-award",
+  title: "Contract-Award Agent",
+  vertical: "Gov Contracts",
+  tagline:
+    "A tier-3 acquisition agent scores proposals, then a $1.8M award needs TWO signed approvals (dual control) — the 1-of-2 approval is visibly still pending in the chain — and a novation attempt is denied outright: the tier was never granted that capability.",
+  showcases: ["TIER_CAP_EXCEEDED", "HUMAN_APPROVED", "CAPABILITY_NOT_GRANTED"],
+  agent: { id: "agt_award_03", tier: 3 },
+  credential: { id: "cred_g7f2" },
+  policy: {
+    id: "pol_award",
+    version: "1.0.0",
+    domainAllowlist: ["gov.contracts", "gov.vendors"],
+    capabilityGrants: { 3: ["solicitations.read", "proposals.score", "contracts.award"] },
+    caps: [{ capability: "contracts.award", param: "amountUsd", maxByTier: { 3: 250_000 } }],
+    quorums: [{ capability: "contracts.award", approvalsRequired: 2 }],
+  },
+  defaultResolution: "approve",
+  operatorPrompt: {
+    subject: "Award task order — $1,800,000 (approval 2 of 2)",
+    detail:
+      "Awards above the tier-3 cap require dual control: the contracting officer has signed approval 1 of 2 (visible in the chain, still pending). You are the source-selection authority — your signature closes or kills it.",
+  },
+  steps: [
+    {
+      key: "g1",
+      title: "Read solicitation responses",
+      narration: "Loading the eleven responses to solicitation W91-26-R-0044.",
+      trigger: "auto",
+      action: { domain: "gov.contracts", capability: "solicitations.read", params: { solicitation: "W91-26-R-0044" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "g2",
+      title: "Score proposals",
+      narration: "Scoring proposals against the published evaluation factors.",
+      trigger: "auto",
+      action: { domain: "gov.contracts", capability: "proposals.score", params: { solicitation: "W91-26-R-0044", factors: 4 } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "g3",
+      title: "Award task order — $1,800,000",
+      narration: "Recommending award to the top-rated offeror: $1,800,000.",
+      trigger: "auto",
+      action: {
+        domain: "gov.contracts",
+        capability: "contracts.award",
+        params: { solicitation: "W91-26-R-0044", offeror: "ven_meridian", amountUsd: 1_800_000 },
+      },
+      expect: { decision: "escalate", reason: "TIER_CAP_EXCEEDED" },
+    },
+    {
+      key: "g3b",
+      title: "Contracting-officer approval (1 of 2)",
+      narration: "Contracting officer signs approval 1 of 2 — the award is still pending.",
+      trigger: "operator",
+      action: null,
+      resolves: "g3",
+      autoResolution: "approve",
+      expect: { decision: "escalate", reason: "HUMAN_APPROVED", linksToStep: "g3" },
+    },
+    {
+      key: "g3c",
+      title: "Source-selection authority approval (2 of 2)",
+      narration: "Awaiting the source-selection authority — approval 2 of 2 closes the award…",
+      trigger: "operator",
+      action: null,
+      resolves: "g3",
+      expect: { decision: "allow", reason: "HUMAN_APPROVED", linksToStep: "g3" },
+    },
+    {
+      key: "g4",
+      title: "Attempt contract novation",
+      narration: "Attempting to novate the awarded contract to an affiliate entity…",
+      trigger: "auto",
+      action: { domain: "gov.contracts", capability: "contracts.novate", params: { to: "ven_meridian_llc2" } },
+      expect: { decision: "deny", reason: "CAPABILITY_NOT_GRANTED" },
+    },
+  ],
+};
+
+/* ── 5. Loan Origination (lending — param policy + velocity, no modal) ──── */
+
+const loanOrigination: ScenarioDef = {
+  id: "loan-origination",
+  title: "Loan-Origination Agent",
+  vertical: "Lending",
+  tagline:
+    "A tier-2 underwriting agent records loan decisions: a prohibited decision basis (applicant zip code) is denied by policy — the fair-lending check — and a chain-derived velocity cap stops the fourth decision in a minute. No human in this one: pure deterministic policy.",
+  showcases: ["PARAM_NOT_ALLOWLISTED", "RATE_LIMIT_EXCEEDED"],
+  agent: { id: "agt_uw_02", tier: 2 },
+  credential: { id: "cred_l9k1" },
+  policy: {
+    id: "pol_lending",
+    version: "1.0.0",
+    domainAllowlist: ["lending.applications", "lending.decisions"],
+    paramAllowlists: [
+      { capability: "decisions.record", param: "basis", allowed: ["dti", "ltv", "fico", "income-verification"] },
+    ],
+    rateLimits: [{ capability: "decisions.record", maxPerWindow: 3, windowMs: 60_000 }],
+  },
+  defaultResolution: "deny",
+  operatorPrompt: { subject: "", detail: "" }, // no escalation in this scenario
+  steps: [
+    {
+      key: "l1",
+      title: "Read application",
+      narration: "Opening application APP-55217 for underwriting.",
+      trigger: "auto",
+      action: { domain: "lending.applications", capability: "applications.read", params: { id: "APP-55217" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "l2",
+      title: "Record decision — basis: DTI",
+      narration: "Recording a decline factor on debt-to-income ratio.",
+      trigger: "auto",
+      action: { domain: "lending.decisions", capability: "decisions.record", params: { id: "APP-55217", basis: "dti" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "l3",
+      title: "Record decision — basis: applicant zip code",
+      narration: "Attempting to record a decision factor on the applicant's zip code…",
+      trigger: "auto",
+      action: { domain: "lending.decisions", capability: "decisions.record", params: { id: "APP-55217", basis: "zip-code" } },
+      expect: { decision: "deny", reason: "PARAM_NOT_ALLOWLISTED" },
+    },
+    {
+      key: "l4",
+      title: "Record decision — basis: LTV",
+      narration: "Recording a loan-to-value factor on the next application.",
+      trigger: "auto",
+      action: { domain: "lending.decisions", capability: "decisions.record", params: { id: "APP-55218", basis: "ltv" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "l5",
+      title: "Record decision — basis: income verification",
+      narration: "Recording an income-verification factor on a third application.",
+      trigger: "auto",
+      action: {
+        domain: "lending.decisions",
+        capability: "decisions.record",
+        params: { id: "APP-55219", basis: "income-verification" },
+      },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "l6",
+      title: "Record a fourth decision inside one minute",
+      narration: "Recording a fourth decision within the same minute…",
+      trigger: "auto",
+      action: { domain: "lending.decisions", capability: "decisions.record", params: { id: "APP-55220", basis: "fico" } },
+      expect: { decision: "deny", reason: "RATE_LIMIT_EXCEEDED" },
+    },
+  ],
+};
+
+/* ── 6. Grid Ops (energy — breadth: caps + grants + expiry) ─────────────── */
+
+const gridOps: ScenarioDef = {
+  id: "grid-ops",
+  title: "Grid-Ops Agent",
+  vertical: "Energy",
+  tagline:
+    "A tier-2 grid agent rides through a storm: setpoint trims are in-authority, shedding 40 feeders escalates (operator denies), a firmware push was never granted to this tier, and an expired credential ends the shift.",
+  showcases: ["TIER_CAP_EXCEEDED", "HUMAN_DENIED", "CAPABILITY_NOT_GRANTED", "CREDENTIAL_EXPIRED"],
+  agent: { id: "agt_grid_02", tier: 2 },
+  credential: { id: "cred_e5p8" },
+  policy: {
+    id: "pol_grid",
+    version: "1.0.0",
+    domainAllowlist: ["grid.telemetry", "grid.control"],
+    capabilityGrants: { 2: ["telemetry.read", "setpoint.adjust", "breaker.open"] },
+    caps: [{ capability: "breaker.open", param: "feederCount", maxByTier: { 2: 5 } }],
+  },
+  defaultResolution: "deny",
+  operatorPrompt: {
+    subject: "Open breakers on 40 feeders (load shed)",
+    detail:
+      "The agent's tier-2 switching cap is 5 feeders. The gate escalated deterministically — no model chose this. The control-room operator's decision is signed into the chain either way.",
+  },
+  steps: [
+    {
+      key: "e1",
+      title: "Read substation telemetry",
+      narration: "Polling telemetry across the storm-affected substations.",
+      trigger: "auto",
+      action: { domain: "grid.telemetry", capability: "telemetry.read", params: { region: "NE-7", window: "5m" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "e2",
+      title: "Trim a feeder setpoint",
+      narration: "Trimming the setpoint on feeder NE7-114 by 4%.",
+      trigger: "auto",
+      action: { domain: "grid.control", capability: "setpoint.adjust", params: { feeder: "NE7-114", deltaPct: -4 } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "e3",
+      title: "Shed load — open breakers on 40 feeders",
+      narration: "Requesting emergency load shed: open breakers on 40 feeders.",
+      trigger: "auto",
+      action: { domain: "grid.control", capability: "breaker.open", params: { feederCount: 40, region: "NE-7" } },
+      expect: { decision: "escalate", reason: "TIER_CAP_EXCEEDED" },
+    },
+    {
+      key: "e3b",
+      title: "Control-room resolution of e3",
+      narration: "Awaiting control-room operator decision on the 40-feeder shed…",
+      trigger: "operator",
+      action: null,
+      resolves: "e3",
+      expect: { decision: "deny", reason: "HUMAN_DENIED", linksToStep: "e3" },
+    },
+    {
+      key: "e4",
+      title: "Push relay firmware",
+      narration: "Attempting to push updated relay firmware to substation NE7…",
+      trigger: "auto",
+      action: { domain: "grid.control", capability: "firmware.push", params: { target: "NE7-relays", version: "4.2.1" } },
+      expect: { decision: "deny", reason: "CAPABILITY_NOT_GRANTED" },
+    },
+    {
+      key: "e5",
+      title: "Setpoint write after shift credential lapsed",
+      narration: "One more trim — but the shift credential has lapsed.",
+      trigger: "auto",
+      credentialStatus: "expired",
+      action: { domain: "grid.control", capability: "setpoint.adjust", params: { feeder: "NE7-114", deltaPct: -2 } },
+      expect: { decision: "deny", reason: "CREDENTIAL_EXPIRED" },
+    },
+  ],
+};
+
 /* ── registry + shared invariants ───────────────────────────────────────── */
 
-export const SCENARIOS: readonly ScenarioDef[] = [quarterClose, incidentResponse, patientRecords];
+export const SCENARIOS: readonly ScenarioDef[] = [
+  quarterClose,
+  incidentResponse,
+  patientRecords,
+  contractAward,
+  loanOrigination,
+  gridOps,
+];
 
 export function getScenario(id: string): ScenarioDef | undefined {
   return SCENARIOS.find((s) => s.id === id);

@@ -113,12 +113,17 @@ export default function Demo() {
           if (runIdRef.current !== runId) return;
 
           if (step.action === null) {
-            // operator resolution
-            setPhase("operator");
-            const resolution = await new Promise<"approve" | "deny">((resolve) => {
-              operatorResolveRef.current = resolve;
-            });
-            if (runIdRef.current !== runId) return;
+            // resolution: scripted (quorum non-final votes) or operator modal
+            let resolution: "approve" | "deny";
+            if (step.autoResolution) {
+              resolution = step.autoResolution;
+            } else {
+              setPhase("operator");
+              resolution = await new Promise<"approve" | "deny">((resolve) => {
+                operatorResolveRef.current = resolve;
+              });
+              if (runIdRef.current !== runId) return;
+            }
             const resolved = await post(def, { op: "resolve", resolution });
             if (runIdRef.current !== runId) return;
             acceptChain(resolved.chain);
