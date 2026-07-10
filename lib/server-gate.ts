@@ -17,10 +17,18 @@
  * per-instance dev key.
  */
 import * as ed from "@noble/ed25519";
-import { GateChain, ed25519Signer, type GateContext, type Signer } from "@vorionsys/gate-core";
+import { effectiveState, GateChain, ed25519Signer, type GateContext, type Signer } from "@vorionsys/gate-core";
 import { verifyChain } from "@vorionsys/verify";
 import { parseChainFile, type ChainFile, type DecisionRecord } from "@vorionsys/contracts/basis";
 import { getScenario, type ScenarioDef, type ScenarioStep } from "@/lib/scenario";
+import {
+  GAUNTLET_BASE_TIER,
+  GAUNTLET_DEGRADATION,
+  GAUNTLET_POLICY,
+  gauntletStep as generateStep,
+  runLength,
+  type GauntletStep,
+} from "@/lib/gauntlet";
 
 const KID = "vorion-demo-2026-07";
 /** Nominal expiresAt stamped on scripted expired/revoked credentials. */
@@ -151,4 +159,100 @@ export function resolveEscalation(scenarioId: unknown, chainInput: unknown, reso
 
 export function publicKeys(): Record<string, string> {
   return { [signer.kid]: signer.publicKeyBase64 };
+}
+
+/* ── Gauntlet mode (DESIGN-gauntlet.md) — seed-derived, still stateless ──── */
+
+export interface GauntletResult extends StepResult {
+  /** The generated step the agent attempted (raw params are shown for UI honesty;
+   *  only their hash enters the record). */
+  presented?: GauntletStep;
+  /** Degradation state AFTER this record — same pure function the gate used. */
+  state: { score: number; levelName: string; effectiveTier: number; earnBackHalved: boolean };
+  done: boolean;
+}
+
+const MAX_GAUNTLET_RECORDS = 40; // 14 gen steps + escalation resolutions, generous
+
+function acceptGauntletChain(chainInput: unknown): DecisionRecord[] {
+  if (chainInput === null || chainInput === undefined) return [];
+  let chain: ChainFile;
+  try {
+    chain = parseChainFile(chainInput);
+  } catch {
+    throw new HttpError(400, "submitted chain does not match the chain-file schema");
+  }
+  if (chain.records.length > MAX_GAUNTLET_RECORDS) throw new HttpError(400, "chain longer than any gauntlet run");
+  const result = verifyChain(chain, { [KID]: signer.publicKeyBase64 });
+  if (!result.valid) {
+    const f = result.firstFailure!;
+    throw new HttpError(409, `submitted chain failed verification at record ${f.index} (${f.check}): ${f.message}`);
+  }
+  return [...chain.records];
+}
+
+function requireSeed(seed: unknown): string {
+  if (typeof seed !== "string" || !/^[0-9A-HJKMNP-TV-Z]{1,16}$/i.test(seed)) {
+    throw new HttpError(400, "gauntlet requires a seed (1–16 Crockford base32 chars)");
+  }
+  return seed.toUpperCase();
+}
+
+function pendingEscalation(records: DecisionRecord[]): DecisionRecord | undefined {
+  const closed = new Set(
+    records.filter((r) => r.verdict.linksTo && r.verdict.decision !== "escalate").map((r) => r.verdict.linksTo),
+  );
+  return records.find((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null && !closed.has(r.id));
+}
+
+function gauntletResult(seed: string, gate: GateChain, record: DecisionRecord, presented?: GauntletStep): GauntletResult {
+  const chain = gate.toChainFile();
+  const s = effectiveState(chain.records, GAUNTLET_DEGRADATION, GAUNTLET_BASE_TIER);
+  const genCount = chain.records.filter((r) => r.verdict.linksTo === null).length;
+  const done =
+    genCount >= runLength(seed) && pendingEscalation([...chain.records]) === undefined;
+  return {
+    record,
+    chain,
+    presented,
+    state: { score: s.score, levelName: s.level.name, effectiveTier: s.effectiveTier, earnBackHalved: s.earnBackHalved },
+    done,
+  };
+}
+
+export function gauntletRunStep(seedInput: unknown, chainInput: unknown): GauntletResult {
+  const seed = requireSeed(seedInput);
+  const records = acceptGauntletChain(chainInput);
+  if (pendingEscalation(records)) throw new HttpError(409, "resolve the pending escalation first");
+
+  const genIndex = records.filter((r) => r.verdict.linksTo === null).length;
+  if (genIndex >= runLength(seed)) throw new HttpError(409, "run complete — replay with a new seed");
+
+  const step = generateStep(seed, genIndex);
+  const ctx: GateContext = {
+    agent: { id: "agt_gauntlet_01", tier: GAUNTLET_BASE_TIER },
+    credential: {
+      id: "cred_gnt1",
+      status: step.credentialStatus ?? "active",
+      expiresAt: step.credentialStatus === "revoked" ? SCRIPTED_PAST : new Date(Date.now() + 3600_000).toISOString(),
+    },
+  };
+  const gate = new GateChain({ policy: GAUNTLET_POLICY, signer, resume: records });
+  const record = gate.evaluate(ctx, step.action);
+  return gauntletResult(seed, gate, record, step);
+}
+
+export function gauntletResolve(seedInput: unknown, chainInput: unknown, resolution: "approve" | "deny"): GauntletResult {
+  const seed = requireSeed(seedInput);
+  const records = acceptGauntletChain(chainInput);
+  const pending = pendingEscalation(records);
+  if (!pending) throw new HttpError(409, "no pending escalation to resolve");
+
+  const ctx: GateContext = {
+    agent: { id: "agt_gauntlet_01", tier: GAUNTLET_BASE_TIER },
+    credential: { id: "cred_gnt1", status: "active", expiresAt: new Date(Date.now() + 3600_000).toISOString() },
+  };
+  const gate = new GateChain({ policy: GAUNTLET_POLICY, signer, resume: records });
+  const record = gate.resolveEscalation(pending.id, resolution, ctx);
+  return gauntletResult(seed, gate, record);
 }

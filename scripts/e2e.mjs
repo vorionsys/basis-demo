@@ -199,6 +199,61 @@ async function runScenario(scenarioId, oracle) {
 
 for (const [id, oracle] of Object.entries(ORACLE)) await runScenario(id, oracle);
 
+/* ── Gauntlet: seed-derived randomized mode ─────────────────────────────── */
+
+async function runGauntlet(seed, resolveWith = "approve") {
+  let chain = null;
+  const post = async (body, expect = 200) => {
+    const res = await fetch(`${BASE}/api/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scenarioId: "gauntlet", seed, chain, ...body }),
+    });
+    const data = await res.json();
+    if (res.status !== expect) die(`gauntlet(${seed}): expected ${expect}, got ${res.status}: ${JSON.stringify(data)}`);
+    return data;
+  };
+  for (let guard = 0; guard < 60; guard++) {
+    const r = await post({ op: "step" });
+    chain = r.chain;
+    if (r.record.verdict.decision === "escalate" && !r.done) {
+      const r2 = await post({ op: "resolve", resolution: resolveWith });
+      chain = r2.chain;
+      if (r2.done) return chain;
+    }
+    if (r.done) return chain;
+  }
+  die(`gauntlet(${seed}): never finished`);
+}
+
+{
+  const seed = "E2ETEST1";
+  const c1 = await runGauntlet(seed);
+  const c2 = await runGauntlet(seed);
+  const sig = (c) => c.records.map((r) => [r.verdict.decision, r.verdict.reason, r.agent.tier].join("/")).join(",");
+  if (sig(c1) !== sig(c2)) die(`gauntlet determinism: same seed produced different runs\n${sig(c1)}\n${sig(c2)}`);
+  const result = verifyChain(c1, keys);
+  if (!result.valid) die(`gauntlet chain does not verify: ${JSON.stringify(result.firstFailure)}`);
+  console.log(`\n━━ gauntlet (${seed})\n✓ deterministic replay (${c1.records.length} records, identical decision/reason/tier sequence)\n✓ chain verifies`);
+
+  // sweep: several seeds — every chain must verify; tiers never negative;
+  // any CIRCUIT_BREAKER_OPEN must be preceded by at least 3 denies
+  let breakerSeen = 0;
+  for (const s of ["SWEEP001", "SWEEP002", "SWEEP003", "SWEEP004", "SWEEP005"]) {
+    const c = await runGauntlet(s, s === "SWEEP002" ? "deny" : "approve");
+    const v = verifyChain(c, keys);
+    if (!v.valid) die(`gauntlet sweep ${s}: chain invalid`);
+    if (c.records.some((r) => r.agent.tier < 0)) die(`gauntlet sweep ${s}: negative tier`);
+    const idx = c.records.findIndex((r) => r.verdict.reason === "CIRCUIT_BREAKER_OPEN");
+    if (idx !== -1) {
+      breakerSeen++;
+      const priorDenies = c.records.slice(0, idx).filter((r) => r.verdict.decision === "deny").length;
+      if (priorDenies < 3) die(`gauntlet sweep ${s}: breaker tripped after only ${priorDenies} denies`);
+    }
+  }
+  console.log(`✓ sweep: 5 seeds verify · tiers non-negative · breaker preceded by strikes (${breakerSeen} breaker run${breakerSeen === 1 ? "" : "s"})`);
+}
+
 stopServer();
-console.log("\nE2E PASS — all scenarios");
+console.log("\nE2E PASS — all scenarios + gauntlet");
 process.exit(0);

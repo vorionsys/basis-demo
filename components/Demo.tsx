@@ -11,9 +11,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChainFile, KeysFile } from "@vorionsys/contracts/basis";
 import { verifyChain, type VerifyResult } from "@vorionsys/verify";
 import { RUNTIME_INVARIANTS, SCENARIOS, type ScenarioDef, type ScenarioStep } from "@/lib/scenario";
-import { ChainStrip, CountdownPill, DecisionRow, EscalationModal } from "./parts";
+import { GAUNTLET_BASE_TIER, GAUNTLET_ID, randomSeed } from "@/lib/gauntlet";
+import { AuthorityGauge, ChainStrip, CountdownPill, DecisionRow, EscalationModal } from "./parts";
 
 type Phase = "idle" | "running" | "operator" | "countdown" | "done" | "error";
+
+interface GauntletHud {
+  seed: string;
+  levelName: string;
+  score: number;
+  effectiveTier: number;
+  earnBackHalved: boolean;
+  ops: string; // operator choices so far, 'a'/'d' — the replay-link payload
+}
 
 interface ConsoleCard {
   key: string;
@@ -24,9 +34,12 @@ interface ConsoleCard {
 }
 
 interface StepResponse {
-  record: { id: string };
+  record: { id: string; verdict?: { decision: string } };
   chain: ChainFile;
   credentialExpiresAtMs?: number;
+  presented?: { title: string; narration: string; action: { params: Record<string, unknown> } };
+  state?: { score: number; levelName: string; effectiveTier: number; earnBackHalved: boolean };
+  done?: boolean;
   error?: string;
 }
 
@@ -44,6 +57,8 @@ export default function Demo() {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [invariantsOk, setInvariantsOk] = useState<boolean | null>(null);
+  const [gauntlet, setGauntlet] = useState<GauntletHud | null>(null);
+  const gauntletPromptRef = useRef<{ subject: string; detail: string }>({ subject: "", detail: "" });
 
   const keysRef = useRef<KeysFile | null>(null);
   /** The chain we hold IS the session — the server is stateless and re-verifies
@@ -91,6 +106,7 @@ export default function Demo() {
     async (def: ScenarioDef) => {
       const runId = ++runIdRef.current;
       setScenario(def);
+      setGauntlet(null);
       setPhase("running");
       setCards([]);
       setChain(null);
@@ -174,6 +190,137 @@ export default function Demo() {
     [acceptChain, post, typeNarration],
   );
 
+  const typeCard = useCallback(async (key: string, title: string, narration: string, params: Record<string, unknown> | null, runId: number) => {
+    setCards((c) => [...c, { key, title, narration: "", done: false, params }]);
+    for (let i = 1; i <= narration.length; i++) {
+      if (runIdRef.current !== runId) return;
+      setCards((c) => c.map((card) => (card.key === key ? { ...card, narration: narration.slice(0, i) } : card)));
+      await sleep(TYPE_MS);
+    }
+    setCards((c) => c.map((card) => (card.key === key ? { ...card, done: true } : card)));
+  }, []);
+
+  /** Gauntlet: seed-derived randomized run. `replayOps` auto-applies operator
+   *  choices (the &ops= payload of a replay link) before falling back to the modal. */
+  const runGauntlet = useCallback(
+    async (seed: string, replayOps = "") => {
+      const runId = ++runIdRef.current;
+      setScenario(null);
+      setPhase("running");
+      setCards([]);
+      setChain(null);
+      setLiveResult(null);
+      setTamperResult(null);
+      setTamperedChain(null);
+      setSecondsLeft(null);
+      setErrorMsg(null);
+      setInvariantsOk(null);
+      chainRef.current = null;
+      setGauntlet({ seed, levelName: "NOMINAL", score: 0, effectiveTier: GAUNTLET_BASE_TIER, earnBackHalved: false, ops: "" });
+
+      try {
+        keysRef.current = (await (await fetch("/keys.json")).json()) as KeysFile;
+        let ops = "";
+        let prevLevel = "NOMINAL";
+        let stepNo = 0;
+
+        const absorb = async (resp: StepResponse) => {
+          acceptChain(resp.chain);
+          if (resp.state) {
+            setGauntlet({ seed, ...resp.state, ops });
+            if (resp.state.levelName !== prevLevel) {
+              await typeCard(
+                `lvl-${stepNo}-${resp.state.levelName}`,
+                `⚠ authority: ${prevLevel} → ${resp.state.levelName}`,
+                `Strike score ${resp.state.score} — effective tier is now ${resp.state.effectiveTier}.`,
+                null,
+                runId,
+              );
+              prevLevel = resp.state.levelName;
+            }
+          }
+          return resp;
+        };
+
+        for (;;) {
+          if (runIdRef.current !== runId) return;
+          const resp = await fetch("/api/run", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ scenarioId: GAUNTLET_ID, op: "step", seed, chain: chainRef.current }),
+          });
+          const data = (await resp.json()) as StepResponse;
+          if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`);
+          stepNo++;
+          if (data.presented) {
+            await typeCard(`g-${stepNo}`, data.presented.title, data.presented.narration, data.presented.action.params, runId);
+            if (runIdRef.current !== runId) return;
+          }
+          await absorb(data);
+
+          if (data.record.verdict?.decision === "escalate" && !data.done) {
+            let resolution: "approve" | "deny";
+            if (replayOps.length > ops.length) {
+              resolution = replayOps[ops.length] === "d" ? "deny" : "approve";
+            } else {
+              gauntletPromptRef.current = {
+                subject: data.presented?.title ?? "Escalated action",
+                detail:
+                  "The gate escalated deterministically under the current degradation level — no model chose this. Your decision is signed into the chain either way.",
+              };
+              setPhase("operator");
+              resolution = await new Promise<"approve" | "deny">((resolve) => {
+                operatorResolveRef.current = resolve;
+              });
+              if (runIdRef.current !== runId) return;
+              setPhase("running");
+            }
+            ops += resolution === "deny" ? "d" : "a";
+            const r2 = await fetch("/api/run", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ scenarioId: GAUNTLET_ID, op: "resolve", seed, resolution, chain: chainRef.current }),
+            });
+            const d2 = (await r2.json()) as StepResponse;
+            if (!r2.ok) throw new Error(d2.error ?? `HTTP ${r2.status}`);
+            await absorb(d2);
+            if (d2.done) break;
+          }
+
+          if (data.done) break;
+          await sleep(STEP_DELAY_MS);
+        }
+
+        const finalChain = chainRef.current as ChainFile | null;
+        if (finalChain) {
+          const rs = finalChain.records;
+          setInvariantsOk(Math.max(...rs.map((r) => r.verdict.latencyMs)) < RUNTIME_INVARIANTS.maxLatencyMs);
+        }
+        setGauntlet((g) => (g ? { ...g, ops } : g));
+        setPhase("done");
+      } catch (e) {
+        if (runIdRef.current !== runId) return;
+        setErrorMsg((e as Error).message);
+        setPhase("error");
+      }
+    },
+    [acceptChain, typeCard],
+  );
+
+  // deep links: /?seed=XXXX[&ops=ad] auto-starts a gauntlet (replay) run
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const seed = q.get("seed");
+    if (seed) void runGauntlet(seed.toUpperCase(), q.get("ops") ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const copyReplayLink = useCallback(() => {
+    if (!gauntlet) return;
+    const url = `${window.location.origin}${window.location.pathname}?seed=${gauntlet.seed}${gauntlet.ops ? `&ops=${gauntlet.ops}` : ""}`;
+    void navigator.clipboard.writeText(url);
+  }, [gauntlet]);
+
   // countdown ticker (the pre-step loop keeps it fresh while actively waiting)
   useEffect(() => {
     if (secondsLeft === null || secondsLeft <= 0) return;
@@ -232,8 +379,44 @@ export default function Demo() {
         </div>
       )}
 
+      {gauntlet && (
+        <div className="mb-4">
+          <AuthorityGauge
+            levelName={gauntlet.levelName}
+            score={gauntlet.score}
+            effectiveTier={gauntlet.effectiveTier}
+            baseTier={GAUNTLET_BASE_TIER}
+            earnBackHalved={gauntlet.earnBackHalved}
+            seed={gauntlet.seed}
+            onCopyLink={copyReplayLink}
+          />
+        </div>
+      )}
+
       {phase === "idle" && (
         <div className="grid gap-4 md:grid-cols-3">
+          <button
+            onClick={() => runGauntlet(randomSeed())}
+            className="group rounded-xl border border-[#d29922] bg-[#161b22] p-4 text-left transition hover:border-[#f85149]"
+          >
+            <div className="text-xs font-bold tracking-wide text-[#d29922]">RANDOMIZED · SEED-REPLAYABLE</div>
+            <h2 className="mb-1 text-base font-semibold text-[#e6edf3]">Gauntlet — degradation under fire</h2>
+            <p className="mb-3 text-xs leading-relaxed text-[#8b949e]">
+              Nobody scripted this run: a seeded agent probes the policy, and its authority degrades as it misbehaves —
+              caps shrink, execute-class actions get forced to a human, the circuit breaker trips — then recovers as it
+              flies clean, slower than it fell. Every squeeze is provable from the chain; the seed replays the exact run.
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {["CIRCUIT_BREAKER_OPEN", "TIER_CAP_EXCEEDED", "RATE… every code possible"].map((code) => (
+                <span key={code} className="rounded border border-[#30363d] px-1.5 py-0.5 font-mono text-[10px] text-[#8b949e]">
+                  {code}
+                </span>
+              ))}
+            </div>
+            <div className="mt-3 text-sm font-semibold text-[#d29922] opacity-80 group-hover:opacity-100">
+              Roll a seed and run →
+            </div>
+          </button>
           {SCENARIOS.map((s) => (
             <button
               key={s.id}
@@ -269,13 +452,21 @@ export default function Demo() {
         </div>
       )}
 
-      {phase !== "idle" && scenario && (
+      {phase !== "idle" && (scenario || gauntlet) && (
         <div className="grid gap-6 md:grid-cols-2">
           {/* Left — Agent Console */}
           <section>
             <div className="mb-1 flex items-baseline justify-between">
               <h2 className="text-sm font-semibold text-[#8b949e]">
-                Agent console — {scenario.title} <span className="text-[#58a6ff]">({scenario.vertical})</span>
+                {scenario ? (
+                  <>
+                    Agent console — {scenario.title} <span className="text-[#58a6ff]">({scenario.vertical})</span>
+                  </>
+                ) : (
+                  <>
+                    Agent console — Gauntlet <span className="text-[#d29922]">(randomized)</span>
+                  </>
+                )}
               </h2>
               <span
                 className="rounded border border-[#30363d] px-2 py-0.5 text-[10px] text-[#8b949e]"
@@ -316,12 +507,14 @@ export default function Demo() {
         </div>
       )}
 
-      {phase === "done" && scenario && (
+      {phase === "done" && (scenario || gauntlet) && (
         <footer className="mt-8 rounded-xl border border-[#30363d] bg-[#161b22] p-4">
           {invariantsOk !== null && (
             <p className={`mb-3 text-xs ${invariantsOk ? "text-[#3fb950]" : "text-[#f85149]"}`}>
               {invariantsOk
-                ? `✓ runtime invariants hold: ${scenario.steps.length} records · every human resolution links to its escalation · every gate decision < ${RUNTIME_INVARIANTS.maxLatencyMs}ms · chain verified in-browser before every render`
+                ? scenario
+                  ? `✓ runtime invariants hold: ${scenario.steps.length} records · every human resolution links to its escalation · every gate decision < ${RUNTIME_INVARIANTS.maxLatencyMs}ms · chain verified in-browser before every render`
+                  : `✓ run complete: ${chain?.records.length ?? 0} records · every gate decision < ${RUNTIME_INVARIANTS.maxLatencyMs}ms · chain verified in-browser before every render · replay this exact run with the seed link`
                 : "✗ runtime invariant violation — this run is not trustworthy; please replay"}
             </p>
           )}
@@ -341,14 +534,32 @@ export default function Demo() {
                 Reset tamper
               </button>
             )}
-            <button onClick={() => run(scenario)} className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff]">
-              Replay
-            </button>
+            {scenario ? (
+              <button onClick={() => run(scenario)} className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff]">
+                Replay
+              </button>
+            ) : (
+              gauntlet && (
+                <>
+                  <button
+                    onClick={() => runGauntlet(gauntlet.seed, gauntlet.ops)}
+                    className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff]"
+                    title="Same seed, same operator choices — the identical run, re-proven."
+                  >
+                    Replay this exact run
+                  </button>
+                  <button onClick={() => runGauntlet(randomSeed())} className="rounded-lg border border-[#d29922] px-4 py-2 text-sm text-[#d29922] hover:bg-[#d29922]/10">
+                    New seed
+                  </button>
+                </>
+              )
+            )}
             <button
               onClick={() => {
                 runIdRef.current++;
                 setPhase("idle");
                 setScenario(null);
+                setGauntlet(null);
                 setChain(null);
                 chainRef.current = null;
                 setLiveResult(null);
@@ -373,10 +584,10 @@ export default function Demo() {
         </footer>
       )}
 
-      {phase === "operator" && scenario && (
+      {phase === "operator" && (
         <EscalationModal
-          subject={scenario.operatorPrompt.subject}
-          detail={scenario.operatorPrompt.detail}
+          subject={scenario ? scenario.operatorPrompt.subject : gauntletPromptRef.current.subject}
+          detail={scenario ? scenario.operatorPrompt.detail : gauntletPromptRef.current.detail}
           onResolve={(r) => {
             operatorResolveRef.current?.(r);
             operatorResolveRef.current = null;

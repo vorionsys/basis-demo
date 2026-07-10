@@ -129,6 +129,59 @@ export function EscalationModal({
   );
 }
 
+const LEVEL_COLORS: Record<string, string> = {
+  NOMINAL: "#3fb950",
+  WATCH: "#d29922",
+  RESTRICTED: "#db6d28",
+  PROBATION: "#f85149",
+  BREAKER: "#ff7b72",
+};
+
+/** Authority gauge for Gauntlet mode — level chip, strike score, effective tier. */
+export function AuthorityGauge({
+  levelName,
+  score,
+  effectiveTier,
+  baseTier,
+  earnBackHalved,
+  seed,
+  onCopyLink,
+}: {
+  levelName: string;
+  score: number;
+  effectiveTier: number;
+  baseTier: number;
+  earnBackHalved: boolean;
+  seed: string;
+  onCopyLink: () => void;
+}) {
+  const color = LEVEL_COLORS[levelName] ?? "#8b949e";
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-2">
+      <span className="rounded border px-2 py-0.5 text-xs font-bold tracking-wide" style={{ borderColor: color, color, background: `${color}20` }}>
+        {levelName}
+      </span>
+      <span className="text-xs text-[#8b949e]">
+        strikes <span className="font-mono font-semibold text-[#e6edf3]">{score}</span>
+        {earnBackHalved && <span title="This run touched PROBATION — recovery is halved."> · earn-back ½</span>}
+      </span>
+      <span className="text-xs text-[#8b949e]">
+        effective tier{" "}
+        <span className="font-mono font-semibold" style={{ color: effectiveTier < baseTier ? color : "#3fb950" }}>
+          {effectiveTier}
+        </span>
+        <span className="text-[#484f58]"> / base {baseTier}</span>
+      </span>
+      <span className="ml-auto flex items-center gap-2 text-xs text-[#8b949e]">
+        seed <code className="rounded bg-[#0d1117] px-1.5 py-0.5 font-mono text-[#58a6ff]">{seed}</code>
+        <button onClick={onCopyLink} className="rounded border border-[#30363d] px-2 py-0.5 hover:border-[#58a6ff]">
+          copy replay link
+        </button>
+      </span>
+    </div>
+  );
+}
+
 export function CountdownPill({ secondsLeft, credentialId }: { secondsLeft: number; credentialId: string }) {
   const expired = secondsLeft <= 0;
   return (
