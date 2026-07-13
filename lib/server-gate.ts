@@ -79,17 +79,32 @@ function acceptSubmittedChain(def: ScenarioDef, chainInput: unknown): DecisionRe
   return [...chain.records];
 }
 
-function expectNext(def: ScenarioDef, records: DecisionRecord[], attempted: string | "resolve"): ScenarioStep {
-  const expected = def.steps[records.length];
-  if (!expected) throw new HttpError(409, "scenario already complete — replay to start over");
-  const expectedToken = expected.action === null ? "resolve" : expected.key;
-  if (expectedToken !== attempted) {
-    throw new HttpError(
-      409,
-      `out of order: expected ${expected.action === null ? "operator resolution" : expected.key} next`,
-    );
-  }
-  return expected;
+/* Chain-driven legality (mirrors Gauntlet): what may happen next is derived
+ * from the verified chain, never from step indexes — so operator branches and
+ * multi-record conflict resolutions are all first-class.
+ *   - action steps map 1:1 to records with linksTo === null, in def order
+ *   - a pending escalation (no linked allow/deny) must be resolved first
+ *   - the run is complete when every action step ran and nothing is pending */
+function actionSteps(def: ScenarioDef): ScenarioStep[] {
+  return def.steps.filter((s) => s.action !== null);
+}
+
+function pendingEscalationIn(records: DecisionRecord[]): DecisionRecord | undefined {
+  const closed = new Set(
+    records.filter((r) => r.verdict.linksTo && r.verdict.decision !== "escalate").map((r) => r.verdict.linksTo),
+  );
+  return records.find((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null && !closed.has(r.id));
+}
+
+function nextActionStep(def: ScenarioDef, records: DecisionRecord[]): ScenarioStep | undefined {
+  const consumed = records.filter((r) => r.verdict.linksTo === null).length;
+  return actionSteps(def)[consumed];
+}
+
+/** The action step a pending escalation record came from (for params + copy). */
+function stepForEscalation(def: ScenarioDef, records: DecisionRecord[], esc: DecisionRecord): ScenarioStep | undefined {
+  const idx = records.slice(0, records.indexOf(esc) + 1).filter((r) => r.verdict.linksTo === null).length - 1;
+  return actionSteps(def)[idx];
 }
 
 /** Credential expiry anchored to the SIGNED timestamp of the arming record. */
@@ -122,9 +137,12 @@ function resultFrom(def: ScenarioDef, gate: GateChain, record: DecisionRecord): 
 export function runStep(scenarioId: unknown, chainInput: unknown, key: string): StepResult {
   const def = requireScenario(scenarioId);
   const records = acceptSubmittedChain(def, chainInput);
-  const step = def.steps.find((s) => s.key === key);
-  if (!step || !step.action) throw new HttpError(400, `unknown or actionless step "${key}"`);
-  expectNext(def, records, key);
+  if (pendingEscalationIn(records)) throw new HttpError(409, "resolve the pending escalation first");
+
+  const expected = nextActionStep(def, records);
+  if (!expected) throw new HttpError(409, "scenario already complete — replay to start over");
+  if (expected.key !== key) throw new HttpError(409, `out of order: expected ${expected.key} next`);
+  const step = expected;
 
   if (step.trigger === "afterCredentialExpiry") {
     const expiry = expiryMsFrom(def, records);
@@ -135,25 +153,28 @@ export function runStep(scenarioId: unknown, chainInput: unknown, key: string): 
   }
 
   const gate = new GateChain({ policy: def.policy, signer, resume: records });
-  const record = gate.evaluate(contextFor(def, step, records), step.action);
+  const record = gate.evaluate(contextFor(def, step, records), step.action!);
   return resultFrom(def, gate, record);
 }
 
 export function resolveEscalation(scenarioId: unknown, chainInput: unknown, resolution: "approve" | "deny"): StepResult {
   const def = requireScenario(scenarioId);
   const records = acceptSubmittedChain(def, chainInput);
-  const step = expectNext(def, records, "resolve");
-
-  // An escalation is CLOSED only by a linked allow/deny; linked escalate
-  // records are quorum approval votes and leave it pending.
-  const closed = new Set(
-    records.filter((r) => r.verdict.linksTo && r.verdict.decision !== "escalate").map((r) => r.verdict.linksTo),
-  );
-  const pending = records.find((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null && !closed.has(r.id));
+  const pending = pendingEscalationIn(records);
   if (!pending) throw new HttpError(409, "no pending escalation to resolve");
 
+  // The def's resolution entries for this escalation, in order — the one being
+  // consumed now supplies scripted credential state (conditions-changed beats).
+  const escStep = stepForEscalation(def, records, pending);
+  const resolutionEntries = def.steps.filter((s) => s.action === null && !s.gateEmitted && s.resolves === escStep?.key);
+  const consumed = records.filter((r) => r.verdict.linksTo === pending.id).length;
+  const entry = resolutionEntries[consumed] ?? resolutionEntries[resolutionEntries.length - 1];
+
   const gate = new GateChain({ policy: def.policy, signer, resume: records });
-  const record = gate.resolveEscalation(pending.id, resolution, contextFor(def, step, records));
+  const record = gate.resolveEscalation(pending.id, resolution, contextFor(def, entry ?? def.steps[0], records), {
+    // hash-verified by the gate before any ceiling is applied
+    params: escStep?.action?.params,
+  });
   return resultFrom(def, gate, record);
 }
 
@@ -252,7 +273,11 @@ export function gauntletResolve(seedInput: unknown, chainInput: unknown, resolut
     agent: { id: "agt_gauntlet_01", tier: GAUNTLET_BASE_TIER },
     credential: { id: "cred_gnt1", status: "active", expiresAt: new Date(Date.now() + 3600_000).toISOString() },
   };
+  // Regenerate the escalated step's raw params from the seed (deterministic) so
+  // the gate can hash-verify them and apply the approval ceiling.
+  const genIndex = records.filter((r) => r.verdict.linksTo === null).indexOf(pending);
+  const escStep = genIndex >= 0 ? generateStep(seed, genIndex) : undefined;
   const gate = new GateChain({ policy: GAUNTLET_POLICY, signer, resume: records });
-  const record = gate.resolveEscalation(pending.id, resolution, ctx);
+  const record = gate.resolveEscalation(pending.id, resolution, ctx, { params: escStep?.action.params });
   return gauntletResult(seed, gate, record);
 }

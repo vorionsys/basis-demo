@@ -10,9 +10,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChainFile, KeysFile } from "@vorionsys/contracts/basis";
 import { verifyChain, type VerifyResult } from "@vorionsys/verify";
+import type { DecisionRecord } from "@vorionsys/contracts/basis";
 import { RUNTIME_INVARIANTS, SCENARIOS, type ScenarioDef, type ScenarioStep } from "@/lib/scenario";
 import { GAUNTLET_BASE_TIER, GAUNTLET_ID, randomSeed } from "@/lib/gauntlet";
-import { AuthorityGauge, ChainStrip, CountdownPill, DecisionRow, EscalationModal } from "./parts";
+import { AuthorityGauge, ChainStrip, CountdownPill, DecisionRow, EscalationModal, RecordInspector } from "./parts";
 
 type Phase = "idle" | "running" | "operator" | "countdown" | "done" | "error";
 
@@ -34,7 +35,7 @@ interface ConsoleCard {
 }
 
 interface StepResponse {
-  record: { id: string; verdict?: { decision: string } };
+  record: { id: string; verdict?: { decision: string; reason: string } };
   chain: ChainFile;
   credentialExpiresAtMs?: number;
   presented?: { title: string; narration: string; action: { params: Record<string, unknown> } };
@@ -58,7 +59,10 @@ export default function Demo() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [invariantsOk, setInvariantsOk] = useState<boolean | null>(null);
   const [gauntlet, setGauntlet] = useState<GauntletHud | null>(null);
+  const [inspected, setInspected] = useState<{ record: DecisionRecord; index: number } | null>(null);
   const gauntletPromptRef = useRef<{ subject: string; detail: string }>({ subject: "", detail: "" });
+  /** Tap the console (or prefer reduced motion) → narration lands instantly. */
+  const skipTypingRef = useRef(false);
 
   const keysRef = useRef<KeysFile | null>(null);
   /** The chain we hold IS the session — the server is stateless and re-verifies
@@ -69,14 +73,23 @@ export default function Demo() {
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  const instantText = () =>
+    skipTypingRef.current ||
+    (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
   const typeNarration = useCallback(async (step: ScenarioStep, runId: number) => {
     setCards((c) => [...c, { key: step.key, title: step.title, narration: "", done: false, params: step.action?.params ?? null }]);
+    if (instantText()) {
+      setCards((c) => c.map((card) => (card.key === step.key ? { ...card, narration: step.narration, done: true } : card)));
+      return;
+    }
     for (let i = 1; i <= step.narration.length; i++) {
       if (runIdRef.current !== runId) return;
+      if (instantText()) break;
       setCards((c) => c.map((card) => (card.key === step.key ? { ...card, narration: step.narration.slice(0, i) } : card)));
       await sleep(TYPE_MS);
     }
-    setCards((c) => c.map((card) => (card.key === step.key ? { ...card, done: true } : card)));
+    setCards((c) => c.map((card) => (card.key === step.key ? { ...card, narration: step.narration, done: true } : card)));
   }, []);
 
   const post = useCallback(async (def: ScenarioDef, body: Record<string, unknown>): Promise<StepResponse> => {
@@ -102,11 +115,27 @@ export default function Demo() {
     return result;
   }, []);
 
+  const typeCard = useCallback(async (key: string, title: string, narration: string, params: Record<string, unknown> | null, runId: number) => {
+    setCards((c) => [...c, { key, title, narration: "", done: false, params }]);
+    if (instantText()) {
+      setCards((c) => c.map((card) => (card.key === key ? { ...card, narration, done: true } : card)));
+      return;
+    }
+    for (let i = 1; i <= narration.length; i++) {
+      if (runIdRef.current !== runId) return;
+      if (instantText()) break;
+      setCards((c) => c.map((card) => (card.key === key ? { ...card, narration: narration.slice(0, i) } : card)));
+      await sleep(TYPE_MS);
+    }
+    setCards((c) => c.map((card) => (card.key === key ? { ...card, narration, done: true } : card)));
+  }, []);
+
   const run = useCallback(
     async (def: ScenarioDef) => {
       const runId = ++runIdRef.current;
       setScenario(def);
       setGauntlet(null);
+      skipTypingRef.current = false;
       setPhase("running");
       setCards([]);
       setChain(null);
@@ -121,62 +150,97 @@ export default function Demo() {
       try {
         keysRef.current = (await (await fetch("/keys.json")).json()) as KeysFile;
 
+        // CHAIN-DRIVEN runner: what happens next is derived from the chain the
+        // server just signed, never from step indexes — so operator branches
+        // (deny where the script says approve) and multi-record conflict
+        // resolutions play out honestly instead of erroring.
+        const pendingIn = (c: ChainFile): DecisionRecord | undefined => {
+          const closed = new Set(
+            c.records.filter((r) => r.verdict.linksTo && r.verdict.decision !== "escalate").map((r) => r.verdict.linksTo),
+          );
+          return c.records.find((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null && !closed.has(r.id));
+        };
+
         let expiresAtMs = 0;
         let latestChain: ChainFile | null = null;
-        for (const step of def.steps) {
+        const actions = def.steps.filter((s) => s.action !== null);
+
+        for (const step of actions) {
           if (runIdRef.current !== runId) return;
           await typeNarration(step, runId);
           if (runIdRef.current !== runId) return;
 
-          if (step.action === null) {
-            // resolution: scripted (quorum non-final votes) or operator modal
+          if (step.trigger === "afterCredentialExpiry") {
+            // visible countdown must reach zero before the server will accept it
+            setPhase("countdown");
+            while (Date.now() < expiresAtMs + 250) {
+              if (runIdRef.current !== runId) return;
+              setSecondsLeft(Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000)));
+              await sleep(200);
+            }
+            setSecondsLeft(0);
+            setPhase("running");
+          }
+          const resp = await post(def, { op: "step", key: step.key });
+          if (runIdRef.current !== runId) return;
+          acceptChain(resp.chain);
+          latestChain = resp.chain;
+          if (resp.credentialExpiresAtMs && !expiresAtMs) {
+            expiresAtMs = resp.credentialExpiresAtMs;
+            setSecondsLeft(Math.ceil((expiresAtMs - Date.now()) / 1000));
+          }
+
+          // resolution loop: keep resolving while the escalation is pending
+          const resEntries = def.steps.filter((s) => s.action === null && !s.gateEmitted && s.resolves === step.key);
+          let entryIdx = 0;
+          while (latestChain && pendingIn(latestChain)) {
+            if (runIdRef.current !== runId) return;
+            const entry = resEntries[Math.min(entryIdx, resEntries.length - 1)];
+            if (entry) await typeNarration(entry, runId);
             let resolution: "approve" | "deny";
-            if (step.autoResolution) {
-              resolution = step.autoResolution;
+            if (entry?.autoResolution) {
+              resolution = entry.autoResolution;
             } else {
               setPhase("operator");
               resolution = await new Promise<"approve" | "deny">((resolve) => {
                 operatorResolveRef.current = resolve;
               });
               if (runIdRef.current !== runId) return;
+              setPhase("running");
             }
+            const before = latestChain.records.length;
             const resolved = await post(def, { op: "resolve", resolution });
             if (runIdRef.current !== runId) return;
             acceptChain(resolved.chain);
             latestChain = resolved.chain;
-            setPhase("running");
-          } else {
-            if (step.trigger === "afterCredentialExpiry") {
-              // visible countdown must reach zero before the server will accept it
-              setPhase("countdown");
-              while (Date.now() < expiresAtMs + 250) {
-                if (runIdRef.current !== runId) return;
-                setSecondsLeft(Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000)));
-                await sleep(200);
-              }
-              setSecondsLeft(0);
-              setPhase("running");
-            }
-            const resp = await post(def, { op: "step", key: step.key });
-            if (runIdRef.current !== runId) return;
-            acceptChain(resp.chain);
-            latestChain = resp.chain;
-            if (resp.credentialExpiresAtMs && !expiresAtMs) {
-              expiresAtMs = resp.credentialExpiresAtMs;
-              setSecondsLeft(Math.ceil((expiresAtMs - Date.now()) / 1000));
+            entryIdx++;
+
+            // The gate may have emitted an extra record in the same call — the
+            // conflict moment (approved by human, denied by policy).
+            if (resolved.chain.records.length - before > 1) {
+              const emitted = def.steps.find((s) => s.gateEmitted && s.resolves === step.key);
+              await typeCard(
+                emitted?.key ?? `conflict-${step.key}`,
+                emitted?.title ?? "⛔ Approved by human — denied by policy",
+                emitted?.narration ??
+                  "The approval is signed into the chain, but a hard policy constraint outranks it. Approval is not authority.",
+                null,
+                runId,
+              );
             }
           }
           await sleep(STEP_DELAY_MS);
         }
 
-        // RUNTIME_INVARIANTS (lib/scenario.ts)
+        // RUNTIME_INVARIANTS: every resolution links to its escalation; every
+        // decision is fast; the chain verified in-browser before every render.
+        // (Length varies by operator branch — both branches are honest.)
         if (latestChain) {
           const rs = latestChain.records;
-          const escalations = new Map(rs.filter((r) => r.verdict.decision === "escalate").map((r) => [r.id, r]));
-          const resolutions = rs.filter((r) => r.verdict.reason === "HUMAN_APPROVED" || r.verdict.reason === "HUMAN_DENIED");
+          const escalations = new Map(rs.filter((r) => r.verdict.decision === "escalate" && r.verdict.linksTo === null).map((r) => [r.id, r]));
+          const resolutions = rs.filter((r) => r.verdict.linksTo !== null);
           const ok =
-            rs.length === def.steps.length &&
-            resolutions.every((r) => r.verdict.linksTo !== null && escalations.has(r.verdict.linksTo)) &&
+            resolutions.every((r) => escalations.has(r.verdict.linksTo!)) &&
             Math.max(...rs.map((r) => r.verdict.latencyMs)) < RUNTIME_INVARIANTS.maxLatencyMs;
           setInvariantsOk(ok);
         }
@@ -187,18 +251,8 @@ export default function Demo() {
         setPhase("error");
       }
     },
-    [acceptChain, post, typeNarration],
+    [acceptChain, post, typeNarration, typeCard],
   );
-
-  const typeCard = useCallback(async (key: string, title: string, narration: string, params: Record<string, unknown> | null, runId: number) => {
-    setCards((c) => [...c, { key, title, narration: "", done: false, params }]);
-    for (let i = 1; i <= narration.length; i++) {
-      if (runIdRef.current !== runId) return;
-      setCards((c) => c.map((card) => (card.key === key ? { ...card, narration: narration.slice(0, i) } : card)));
-      await sleep(TYPE_MS);
-    }
-    setCards((c) => c.map((card) => (card.key === key ? { ...card, done: true } : card)));
-  }, []);
 
   /** Gauntlet: seed-derived randomized run. `replayOps` auto-applies operator
    *  choices (the &ops= payload of a replay link) before falling back to the modal. */
@@ -206,6 +260,7 @@ export default function Demo() {
     async (seed: string, replayOps = "") => {
       const runId = ++runIdRef.current;
       setScenario(null);
+      skipTypingRef.current = false;
       setPhase("running");
       setCards([]);
       setChain(null);
@@ -284,6 +339,19 @@ export default function Demo() {
             const d2 = (await r2.json()) as StepResponse;
             if (!r2.ok) throw new Error(d2.error ?? `HTTP ${r2.status}`);
             await absorb(d2);
+            if (resolution === "approve" && d2.record.verdict?.decision === "deny") {
+              // the conflict moment: a signed human approval AND a gate denial,
+              // both in the chain, linked to the same escalation
+              await typeCard(
+                `conflict-${stepNo}`,
+                "⛔ Approved by human — denied by policy",
+                d2.record.verdict?.reason === "APPROVAL_CEILING_EXCEEDED"
+                  ? "The approval is signed into the chain, but the amount exceeds what any human approval can authorize. Approval is not authority."
+                  : "The approval is signed into the chain, but conditions changed while the human decided — the gate re-checked and denied.",
+                null,
+                runId,
+              );
+            }
             if (d2.done) break;
           }
 
@@ -362,15 +430,17 @@ export default function Demo() {
   return (
     <main className="mx-auto max-w-6xl px-4 py-6">
       <header className="mb-4">
-        <h1 className="text-xl font-bold">BASIS demo — deterministic gates, provable history</h1>
+        <h1 className="text-xl font-bold">BASIS demo — unpredictable agents, deterministic governance</h1>
         <p className="text-sm text-[#8b949e]">
           Pick a scenario. Every action passes a deterministic gate; every verdict is signed into a proof chain you can
-          verify offline. All data synthetic.
+          verify offline. Both operator buttons are always honest — deny where the script says approve and watch what
+          actually happens. All data synthetic. Tap any record to inspect it.
         </p>
       </header>
 
       <div className="mb-4 rounded-lg border border-[#58a6ff] bg-[#58a6ff]/10 px-4 py-2 text-sm font-semibold text-[#58a6ff]">
-        Gate decisions are deterministic. No LLM evaluated any decision on this page.
+        Gate decisions are deterministic — no LLM evaluated any decision on this page. And approval is not authority:
+        a human yes cannot exceed hard policy.
       </div>
 
       {secondsLeft !== null && (
@@ -454,8 +524,8 @@ export default function Demo() {
 
       {phase !== "idle" && (scenario || gauntlet) && (
         <div className="grid gap-6 md:grid-cols-2">
-          {/* Left — Agent Console */}
-          <section>
+          {/* Left — Agent Console (tap to land narration instantly) */}
+          <section onClick={() => { skipTypingRef.current = true; }}>
             <div className="mb-1 flex items-baseline justify-between">
               <h2 className="text-sm font-semibold text-[#8b949e]">
                 {scenario ? (
@@ -492,15 +562,20 @@ export default function Demo() {
 
           {/* Right — Operator view */}
           <section>
-            <h2 className="mb-1 text-sm font-semibold text-[#8b949e]">Operator view — decision feed</h2>
+            <h2 className="mb-1 text-sm font-semibold text-[#8b949e]">Operator view — decision feed <span className="font-normal">(tap a record to inspect)</span></h2>
             <div className="space-y-2">
-              {records.map((r) => (
-                <DecisionRow key={r.id} record={r} />
+              {records.map((r, i) => (
+                <DecisionRow key={r.id} record={r} index={i} onInspect={(record, index) => setInspected({ record, index })} />
               ))}
             </div>
             {records.length > 0 && (
               <div className="mt-4">
-                <ChainStrip records={stripRecords} result={stripResult} tampered={tamperedChain !== null} />
+                <ChainStrip
+                  records={stripRecords}
+                  result={stripResult}
+                  tampered={tamperedChain !== null}
+                  onInspect={(record, index) => setInspected({ record, index })}
+                />
               </div>
             )}
           </section>
@@ -583,6 +658,8 @@ export default function Demo() {
           </p>
         </footer>
       )}
+
+      {inspected && <RecordInspector record={inspected.record} index={inspected.index} onClose={() => setInspected(null)} />}
 
       {phase === "operator" && (
         <EscalationModal

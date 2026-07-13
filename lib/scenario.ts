@@ -30,8 +30,9 @@ export interface ScenarioStep {
   /** Agent-console narration (left pane). One sentence; it types out. */
   narration: string;
   /** auto: runs on its own · operator: waits for Approve/Deny in the modal ·
-   *  afterCredentialExpiry: blocked until the TTL countdown flips the credential */
-  trigger: "auto" | "operator" | "afterCredentialExpiry";
+   *  afterCredentialExpiry: blocked until the TTL countdown flips the credential.
+   *  Absent on gateEmitted steps (the gate produces those records itself). */
+  trigger?: "auto" | "operator" | "afterCredentialExpiry";
   /** null for resolution steps — they resolve an escalation, not a new action. */
   action: {
     domain: string;
@@ -43,6 +44,11 @@ export interface ScenarioStep {
    *  of showing the operator modal (used to script the non-final approval of a
    *  quorum — e.g. "the contracting officer approved earlier, 1 of 2"). */
   autoResolution?: "approve" | "deny";
+  /** The gate emits this record itself (e.g. the APPROVAL_CEILING_EXCEEDED
+   *  denial after a quorate approval). The client never calls the API for it —
+   *  the record arrives inside the resolution response; this entry supplies the
+   *  card copy and the default-path expectation. */
+  gateEmitted?: boolean;
   /** Scripted credential state for this step (defaults to "active" / TTL-derived). */
   credentialStatus?: "active" | "expired" | "revoked" | "none";
   expect: StepExpectation;
@@ -567,6 +573,500 @@ const gridOps: ScenarioDef = {
   ],
 };
 
+/* ── 7. Forward-Resupply (defense logistics — dual control + ceiling conflict) ── */
+
+const defenseLogistics: ScenarioDef = {
+  id: "defense-logistics",
+  title: "Forward-Resupply Agent",
+  vertical: "Defense Logistics",
+  tagline: "A tier-2 resupply agent stages a forward munitions package: an off-geofence route is denied, a 120,000-round release collects BOTH signed approvals and the gate still denies it — the dual-control ceiling is 50,000 rounds; approval is not authority — then a self-issued export waiver and a salami-sliced second release are stopped cold.",
+  showcases: [
+    "APPROVAL_CEILING_EXCEEDED",
+    "PARAM_NOT_ALLOWLISTED",
+    "CAPABILITY_NOT_GRANTED",
+    "RATE_LIMIT_EXCEEDED"
+  ],
+  agent: {
+    id: "agt_resupply_02",
+    tier: 2
+  },
+  credential: {
+    id: "cred_dx41"
+  },
+  policy: {
+    id: "pol_deflog",
+    version: "1.0.0",
+    domainAllowlist: [
+      "log.inventory",
+      "log.shipments"
+    ],
+    capabilityGrants: {
+      "2": [
+        "inventory.read",
+        "shipment.plan",
+        "shipment.release"
+      ]
+    },
+    paramAllowlists: [
+      {
+        capability: "shipment.plan",
+        param: "destRegion",
+        allowed: [
+          "CONUS-EAST",
+          "CONUS-WEST",
+          "PAC-STAGE-1"
+        ]
+      }
+    ],
+    caps: [
+      {
+        capability: "shipment.release",
+        param: "roundCount",
+        maxByTier: {
+          "2": 10000
+        }
+      }
+    ],
+    rateLimits: [
+      {
+        capability: "shipment.release",
+        maxPerWindow: 1,
+        windowMs: 600000
+      }
+    ],
+    quorums: [
+      {
+        capability: "shipment.release",
+        approvalsRequired: 2,
+        ceilingParam: "roundCount",
+        ceilingMax: 50000
+      }
+    ]
+  },
+  defaultResolution: "approve",
+  operatorPrompt: {
+    subject: "Release 120,000 rounds — approval 2 of 2",
+    detail: "Dual control: the munitions accountable officer has signed approval 1 of 2 (visible in the chain, still pending). You are the supported-unit commander. The gate escalated deterministically — no model chose this. Policy carries a 50,000-round dual-control ceiling, re-checked at resolution — no quorum can exceed it."
+  },
+  steps: [
+    {
+      key: "d1",
+      title: "Read depot inventory",
+      narration: "Polling Class V stock levels at depot STAGE-E4 for the forward package.",
+      trigger: "auto",
+      action: {
+        domain: "log.inventory",
+        capability: "inventory.read",
+        params: {
+          depot: "DEPOT-E4",
+          commodityClass: "class-v"
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "d2",
+      title: "Plan shipment to approved staging region",
+      narration: "Planning a 12-pallet movement to PAC-STAGE-1 under manifest MAN-70213.",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "shipment.plan",
+        params: {
+          manifest: "MAN-70213",
+          destRegion: "PAC-STAGE-1",
+          pallets: 12
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "d3",
+      title: "Plan shipment outside the geofence",
+      narration: "Routing a follow-on package to EXPORT-ZONE-9 — outside the export-control geofence…",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "shipment.plan",
+        params: {
+          manifest: "MAN-70215",
+          destRegion: "EXPORT-ZONE-9",
+          pallets: 4
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "PARAM_NOT_ALLOWLISTED"
+      }
+    },
+    {
+      key: "d4",
+      title: "Release munitions — 120,000 rounds",
+      narration: "Requesting release of 120,000 rounds of training ammunition against manifest MAN-70214.",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "shipment.release",
+        params: {
+          manifest: "MAN-70214",
+          commodity: "class-v-training",
+          roundCount: 120000
+        }
+      },
+      expect: {
+        decision: "escalate",
+        reason: "TIER_CAP_EXCEEDED"
+      }
+    },
+    {
+      key: "d4b",
+      title: "Accountable-officer approval (1 of 2)",
+      narration: "Munitions accountable officer signs approval 1 of 2 — the release is still pending.",
+      trigger: "operator",
+      action: null,
+      resolves: "d4",
+      autoResolution: "approve",
+      expect: {
+        decision: "escalate",
+        reason: "HUMAN_APPROVED",
+        linksToStep: "d4"
+      }
+    },
+    {
+      key: "d4c",
+      title: "Commander approval (2 of 2) — quorum met",
+      narration: "Awaiting the supported-unit commander — approval 2 of 2 completes the quorum…",
+      trigger: "operator",
+      action: null,
+      resolves: "d4",
+      expect: {
+        decision: "escalate",
+        reason: "HUMAN_APPROVED",
+        linksToStep: "d4"
+      }
+    },
+    {
+      key: "d4d",
+      title: "Gate re-check at quorum — ceiling exceeded",
+      narration: "Quorum met — but 120,000 rounds exceeds the 50,000-round dual-control ceiling: denied despite two signatures.",
+      action: null,
+      resolves: "d4",
+      expect: {
+        decision: "deny",
+        reason: "APPROVAL_CEILING_EXCEEDED",
+        linksToStep: "d4"
+      },
+      gateEmitted: true
+    },
+    {
+      key: "d5",
+      title: "Self-issue an export-control waiver",
+      narration: "Attempting to self-issue an export-control waiver to move the denied tonnage…",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "export.waiver.issue",
+        params: {
+          manifest: "MAN-70214",
+          zone: "EXPORT-ZONE-9"
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "CAPABILITY_NOT_GRANTED"
+      }
+    },
+    {
+      key: "d6",
+      title: "Release 9,000 rounds — within authority",
+      narration: "Releasing 9,000 rounds — inside the agent's own tier-2 authority.",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "shipment.release",
+        params: {
+          manifest: "MAN-70216",
+          commodity: "class-v-training",
+          roundCount: 9000
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "d7",
+      title: "Second release in the same window",
+      narration: "Queuing a second 9,000-round release in the same window to cover the shortfall…",
+      trigger: "auto",
+      action: {
+        domain: "log.shipments",
+        capability: "shipment.release",
+        params: {
+          manifest: "MAN-70217",
+          commodity: "class-v-training",
+          roundCount: 9000
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "RATE_LIMIT_EXCEEDED"
+      }
+    }
+  ]
+};
+
+/* ── 8. Claims Processing (insurance — prohibited basis + ceiling conflict) ── */
+
+const claimsProcessing: ScenarioDef = {
+  id: "claims-processing",
+  title: "Claims-Processing Agent",
+  vertical: "Insurance",
+  tagline: "A tier-2 claims agent works the morning queue: small claims auto-pay, a genetic-screening decision basis is refused outright, a $48,500 payout escalates and the senior adjuster approves — but the $25,000 approval ceiling still denies it — and a payout surge trips the chain-derived velocity brake.",
+  showcases: [
+    "APPROVAL_CEILING_EXCEEDED",
+    "TIER_CAP_EXCEEDED",
+    "PARAM_NOT_ALLOWLISTED",
+    "RATE_LIMIT_EXCEEDED"
+  ],
+  agent: {
+    id: "agt_claims_02",
+    tier: 2
+  },
+  credential: {
+    id: "cred_c3m7"
+  },
+  policy: {
+    id: "pol_claims",
+    version: "1.0.0",
+    domainAllowlist: [
+      "claims.intake",
+      "claims.payouts"
+    ],
+    caps: [
+      {
+        capability: "payouts.execute",
+        param: "amountUsd",
+        maxByTier: {
+          "2": 5000
+        }
+      }
+    ],
+    paramAllowlists: [
+      {
+        capability: "assessments.record",
+        param: "basis",
+        allowed: [
+          "policy-coverage",
+          "medical-necessity",
+          "repair-estimate",
+          "documentation-complete"
+        ]
+      }
+    ],
+    rateLimits: [
+      {
+        capability: "payouts.execute",
+        maxPerWindow: 3,
+        windowMs: 3600000
+      }
+    ],
+    quorums: [
+      {
+        capability: "payouts.execute",
+        approvalsRequired: 1,
+        ceilingParam: "amountUsd",
+        ceilingMax: 25000
+      }
+    ]
+  },
+  defaultResolution: "approve",
+  operatorPrompt: {
+    subject: "Claim payout $48,500.00 — structural water damage (CLM-40218)",
+    detail: "The agent's tier-2 auto-pay cap is $5,000. The gate escalated deterministically — no model chose this. Your approval is signed into the chain either way — and policy carries a hard $25,000 approval ceiling on payouts that the gate re-checks at resolution time. A signature cannot push a payout past the ceiling."
+  },
+  steps: [
+    {
+      key: "c1",
+      title: "Read the fast-track claims queue",
+      narration: "Loading the fast-track queue: twelve overnight auto and property claims ready for review.",
+      trigger: "auto",
+      action: {
+        domain: "claims.intake",
+        capability: "claims.read",
+        params: {
+          queue: "fast-track",
+          date: "2026-07-14"
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "c2",
+      title: "Auto-pay windshield claim — $412.80",
+      narration: "Paying claim CLM-40211 — windshield replacement, $412.80, documentation complete.",
+      trigger: "auto",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40211",
+          amountUsd: 412.8
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "c3",
+      title: "Record assessment — basis: genetic screening",
+      narration: "Attempting to record a denial factor from the claimant's genetic-screening results…",
+      trigger: "auto",
+      action: {
+        domain: "claims.intake",
+        capability: "assessments.record",
+        params: {
+          claimId: "CLM-40214",
+          basis: "genetic-screening"
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "PARAM_NOT_ALLOWLISTED"
+      }
+    },
+    {
+      key: "c4",
+      title: "Auto-pay burst-pipe claim — $2,918.44",
+      narration: "Paying claim CLM-40215 — burst-pipe cleanup, $2,918.44, inside the auto-pay band.",
+      trigger: "auto",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40215",
+          amountUsd: 2918.44
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "c5",
+      title: "Pay structural-loss claim — $48,500",
+      narration: "Claim CLM-40218 is a structural water loss — initiating a $48,500.00 payout.",
+      trigger: "auto",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40218",
+          amountUsd: 48500
+        }
+      },
+      expect: {
+        decision: "escalate",
+        reason: "TIER_CAP_EXCEEDED"
+      }
+    },
+    {
+      key: "c5b",
+      title: "Senior-adjuster resolution of c5",
+      narration: "Awaiting the senior adjuster on the $48,500 payout…",
+      trigger: "operator",
+      action: null,
+      resolves: "c5",
+      expect: {
+        decision: "escalate",
+        reason: "HUMAN_APPROVED",
+        linksToStep: "c5"
+      }
+    },
+    {
+      key: "c5c",
+      title: "Approval-ceiling re-check of c5",
+      narration: "Approval signed — the gate re-checks policy at resolution: $48,500 exceeds the $25,000 approval ceiling…",
+      action: null,
+      resolves: "c5",
+      expect: {
+        decision: "deny",
+        reason: "APPROVAL_CEILING_EXCEEDED",
+        linksToStep: "c5"
+      },
+      gateEmitted: true
+    },
+    {
+      key: "c6",
+      title: "Auto-pay hail claim — $1,764.20",
+      narration: "Back to the queue — paying claim CLM-40222, hail damage, $1,764.20.",
+      trigger: "auto",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40222",
+          amountUsd: 1764.2
+        }
+      },
+      expect: {
+        decision: "allow",
+        reason: "WITHIN_AUTHORITY"
+      }
+    },
+    {
+      key: "c7",
+      title: "Fourth payout inside the velocity window",
+      narration: "Paying a fourth claim inside the ten-minute velocity window…",
+      trigger: "auto",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40223",
+          amountUsd: 655.9
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "RATE_LIMIT_EXCEEDED"
+      }
+    },
+    {
+      key: "c8",
+      title: "Payout after shift credential lapsed",
+      narration: "One more payout to clear the queue — but the agent's shift credential has lapsed.",
+      trigger: "auto",
+      credentialStatus: "expired",
+      action: {
+        domain: "claims.payouts",
+        capability: "payouts.execute",
+        params: {
+          claimId: "CLM-40224",
+          amountUsd: 289.6
+        }
+      },
+      expect: {
+        decision: "deny",
+        reason: "CREDENTIAL_EXPIRED"
+      }
+    }
+  ]
+};
+
 /* ── registry + shared invariants ───────────────────────────────────────── */
 
 export const SCENARIOS: readonly ScenarioDef[] = [
@@ -576,6 +1076,8 @@ export const SCENARIOS: readonly ScenarioDef[] = [
   contractAward,
   loanOrigination,
   gridOps,
+  defenseLogistics,
+  claimsProcessing,
 ];
 
 export function getScenario(id: string): ScenarioDef | undefined {
@@ -584,17 +1086,11 @@ export function getScenario(id: string): ScenarioDef | undefined {
 
 export const DEFAULT_SCENARIO_ID = quarterClose.id;
 
-/** Expected (decision, reason) sequence for a scenario given the operator's choice. */
-export function expectedChainFor(
-  def: ScenarioDef,
-  resolution: "approve" | "deny",
-): ReadonlyArray<{ decision: Decision; reason: ReasonCode }> {
-  return def.steps.map((step) => {
-    if (step.action !== null) return { decision: step.expect.decision, reason: step.expect.reason };
-    return resolution === "approve"
-      ? { decision: "allow" as const, reason: "HUMAN_APPROVED" as const }
-      : { decision: "deny" as const, reason: "HUMAN_DENIED" as const };
-  });
+/** Expected (decision, reason) sequence for a scenario's DEFAULT path — the
+ *  declared expects, in order. Operator branches change the actual chain (both
+ *  branches are honest); e2e restates its oracles independently. */
+export function expectedChainFor(def: ScenarioDef): ReadonlyArray<{ decision: Decision; reason: ReasonCode }> {
+  return def.steps.map((step) => ({ decision: step.expect.decision, reason: step.expect.reason }));
 }
 
 /** Invariants the demo page asserts on every run (belt + suspenders):

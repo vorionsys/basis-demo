@@ -71,13 +71,18 @@ export const GAUNTLET_DEGRADATION: DegradationPolicy = {
 
 export const GAUNTLET_POLICY: PolicyDoc = {
   id: "pol_gauntlet",
-  version: "1.0.0",
+  version: "1.1.0",
   domainAllowlist: ["ops.ledger", "ops.payments", "ops.endpoint", "ops.records"],
   caps: [
     { capability: "payments.execute", param: "amountUsd", maxByTier: { 2: 10_000, 1: 2_500 } },
     { capability: "endpoint.isolate", param: "hostCount", maxByTier: { 2: 10, 1: 2 } },
     { capability: "records.export", param: "recordCount", maxByTier: { 2: 500, 1: 100 } },
   ],
+  // Approval is not authority: a human can approve escalated payments only up
+  // to $100k — larger amounts deny APPROVAL_CEILING_EXCEEDED even after a yes.
+  // With payment amounts seeded from $500–$400k, roughly 3 in 4 escalations
+  // clear the ceiling and 1 in 4 conflict — emergent, not scripted.
+  quorums: [{ capability: "payments.execute", approvalsRequired: 1, ceilingParam: "amountUsd", ceilingMax: 100_000 }],
   degradation: GAUNTLET_DEGRADATION,
 };
 
