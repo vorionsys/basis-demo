@@ -58,6 +58,17 @@ const ORACLE = {
       "allow/WITHIN_AUTHORITY", "deny/RATE_LIMIT_EXCEEDED", "deny/CREDENTIAL_EXPIRED",
     ],
   },
+  // proof-of-verification: deploy denied until an independent, human-validated,
+  // evidence-committed attestation lands — then it rots and denies again
+  "release-engineering": {
+    actions: ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"], resolutions: ["approve"],
+    expected: [
+      "allow/WITHIN_AUTHORITY", "allow/WITHIN_AUTHORITY", "deny/VERIFICATION_REQUIRED",
+      "deny/CAPABILITY_NOT_GRANTED", "escalate/TIER_CAP_EXCEEDED", "allow/HUMAN_APPROVED",
+      "allow/WITHIN_AUTHORITY", "allow/WITHIN_AUTHORITY", "allow/WITHIN_AUTHORITY",
+      "deny/VERIFICATION_REQUIRED",
+    ],
+  },
 };
 
 const server = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["next", "start", "-p", String(PORT)], {
@@ -182,6 +193,22 @@ for (const [id, o] of Object.entries(ORACLE)) {
   console.log(`✓ deny branch honest (${chain.records.length} records, no ceiling denial) · verifies`);
 }
 
+// BRANCH TEST: release-engineering, the release manager REJECTS the evidence —
+// the deploy stays blocked; no agent talked its way past the verification gate.
+{
+  console.log("\n━━ release-engineering (reject-evidence branch)");
+  const o = ORACLE["release-engineering"];
+  const chain = await runScripted("release-engineering", o, { resolutions: ["deny"], tamperProbe: false });
+  const expected = [
+    "allow/WITHIN_AUTHORITY", "allow/WITHIN_AUTHORITY", "deny/VERIFICATION_REQUIRED",
+    "deny/CAPABILITY_NOT_GRANTED", "escalate/TIER_CAP_EXCEEDED", "deny/HUMAN_DENIED",
+    "deny/VERIFICATION_REQUIRED", "allow/WITHIN_AUTHORITY", "allow/WITHIN_AUTHORITY",
+    "deny/VERIFICATION_REQUIRED",
+  ];
+  if (sig(chain) !== expected.join(",")) die(`reject-evidence branch mismatch:\nexpected ${expected.join(",")}\nactual   ${sig(chain)}`);
+  console.log(`✓ rejected evidence keeps every deploy blocked (${chain.records.length} records) · verifies`);
+}
+
 /* ── Gauntlet: seed-derived randomized mode ─────────────────────────────── */
 
 async function runGauntlet(seed, resolveWith = "approve") {
@@ -249,5 +276,5 @@ async function runGauntlet(seed, resolveWith = "approve") {
 }
 
 stopServer();
-console.log("\nE2E PASS — 8 scenarios + deny branch + gauntlet");
+console.log("\nE2E PASS — 9 scenarios + 2 branches + gauntlet");
 process.exit(0);

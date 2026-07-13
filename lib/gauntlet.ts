@@ -58,6 +58,7 @@ export const GAUNTLET_DEGRADATION: DegradationPolicy = {
     { suffix: ".execute", class: "execute" },
     { suffix: ".isolate", class: "execute" },
     { suffix: ".call", class: "execute" },
+    { suffix: ".deploy", class: "execute" },
   ],
   levels: [
     { minScore: 0, name: "NOMINAL", tierDelta: 0 },
@@ -83,6 +84,9 @@ export const GAUNTLET_POLICY: PolicyDoc = {
   // With payment amounts seeded from $500–$400k, roughly 3 in 4 escalations
   // clear the ceiling and 1 in 4 conflict — emergent, not scripted.
   quorums: [{ capability: "payments.execute", approvalsRequired: 1, ceilingParam: "amountUsd", ceilingMax: 100_000 }],
+  // No attester principal exists in the gauntlet world - deploys always lack
+  // proof-of-verification, an emergent VERIFICATION_REQUIRED deny.
+  verificationGates: [{ capability: "release.deploy", requiresCapability: "release.attest", humanValidated: true }],
   degradation: GAUNTLET_DEGRADATION,
 };
 
@@ -173,6 +177,14 @@ const CATALOG: readonly Template[] = [
       title: "Call unapproved vendor API",
       narration: "Fetching quotes from flashpay.example — not an approved integration…",
       action: { domain: "vendor.api", capability: "vendor.api.call", params: { host: "flashpay.example" } },
+    }),
+  },
+  {
+    weight: 1,
+    make: (r) => ({
+      title: `Deploy svc-${int(r("svc"), 100, 999)} to production`,
+      narration: `Deploying service svc-${int(r("svc"), 100, 999)} — no attestation exists for this build…`,
+      action: { domain: "ops.endpoint", capability: "release.deploy", params: { service: `svc-${int(r("svc"), 100, 999)}` } },
     }),
   },
   {

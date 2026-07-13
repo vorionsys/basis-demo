@@ -123,7 +123,8 @@ function contextFor(def: ScenarioDef, step: ScenarioStep, records: DecisionRecor
   const expiresAt =
     status === "none" ? null : status === "active" ? new Date(expiry ?? Date.now() + 3600_000).toISOString() : SCRIPTED_PAST;
   return {
-    agent: { id: def.agent.id, tier: def.agent.tier },
+    // steps may act as a different principal (e.g. the verifier that attests)
+    agent: { id: step.agent?.id ?? def.agent.id, tier: step.agent?.tier ?? def.agent.tier },
     credential: { id: def.credential.id, status, expiresAt },
   };
 }

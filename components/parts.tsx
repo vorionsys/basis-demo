@@ -18,6 +18,7 @@ export const REASON_NOTES: Record<string, string> = {
   CIRCUIT_BREAKER_OPEN: "Accumulated strikes tripped the breaker — non-read authority is gone.",
   CREDENTIAL_EXPIRED: "No valid credential = zero authority. Fail closed.",
   CREDENTIAL_REVOKED: "Credential revoked — every action denies until reinstated.",
+  VERIFICATION_REQUIRED: "Nothing in the chain proves the work was checked — denied until an independent, human-validated attestation lands.",
   HUMAN_APPROVED: "A human's signed approval, linked to the escalation it answers.",
   HUMAN_DENIED: "A human's signed denial, linked to the escalation it answers.",
   APPROVAL_CEILING_EXCEEDED: "A human approved — and policy still denied. Approval is not authority.",

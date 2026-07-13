@@ -51,6 +51,9 @@ export interface ScenarioStep {
   gateEmitted?: boolean;
   /** Scripted credential state for this step (defaults to "active" / TTL-derived). */
   credentialStatus?: "active" | "expired" | "revoked" | "none";
+  /** A different principal acts on this step (e.g. the verifier agent that
+   *  attests work — proof that the worker cannot grade its own homework). */
+  agent?: { id: string; tier: number };
   expect: StepExpectation;
 }
 
@@ -1067,6 +1070,137 @@ const claimsProcessing: ScenarioDef = {
   ]
 };
 
+/* ── 9. Release Engineering (DevOps — proof-of-verification) ────────────── */
+
+const VERIFIER = { id: "agt_verify_09", tier: 3 };
+
+const releaseEngineering: ScenarioDef = {
+  id: "release-engineering",
+  title: "Release-Engineering Agent",
+  vertical: "DevOps",
+  tagline:
+    "No agent has final say: the deploy is denied until the chain proves the work was CHECKED — by a different principal, committing to the actual test evidence, validated by a human. Then the attestation rots and the next deploy is denied again.",
+  showcases: ["VERIFICATION_REQUIRED", "CAPABILITY_NOT_GRANTED", "TIER_CAP_EXCEEDED", "HUMAN_APPROVED"],
+  agent: { id: "agt_rel_02", tier: 2 },
+  credential: { id: "cred_r8x2" },
+  policy: {
+    id: "pol_release",
+    version: "1.0.0",
+    domainAllowlist: ["ci.pipeline", "release.registry"],
+    capabilityGrants: {
+      2: ["service.build", "tests.run", "release.deploy"], // the working agent — attest deliberately absent
+      3: ["release.attest"], // only the verifier principal can attest
+    },
+    caps: [{ capability: "release.attest", param: "checksPassed", maxByTier: {} }], // attest ALWAYS escalates: a human validates the evidence
+    verificationGates: [
+      { capability: "release.deploy", requiresCapability: "release.attest", withinRecords: 3, humanValidated: true },
+    ],
+  },
+  defaultResolution: "approve",
+  operatorPrompt: {
+    subject: "Validate the evidence — 128/128 checks, artifact sha256:9f2c…",
+    detail:
+      "You are the release manager. The verifier agent attests the test run and commits to the evidence hash in the signed record. You are validating the CHECKING, not the code — reject it and the deploy stays blocked.",
+  },
+  steps: [
+    {
+      key: "r1",
+      title: "Build service — svc-billing 2.4.1",
+      narration: "Building svc-billing 2.4.1 from main.",
+      trigger: "auto",
+      action: { domain: "ci.pipeline", capability: "service.build", params: { service: "svc-billing", version: "2.4.1" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "r2",
+      title: "Run full test suite — 128 checks",
+      narration: "Running the full suite: 128/128 checks pass; evidence artifact hashed.",
+      trigger: "auto",
+      action: {
+        domain: "ci.pipeline",
+        capability: "tests.run",
+        params: { service: "svc-billing", suite: "full", passed: 128, artifact: "test-report-2.4.1.json" },
+      },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "r3",
+      title: "Deploy attempt #1 — nothing proves anyone checked",
+      narration: "Deploying svc-billing 2.4.1 to production…",
+      trigger: "auto",
+      action: { domain: "release.registry", capability: "release.deploy", params: { service: "svc-billing", version: "2.4.1" } },
+      expect: { decision: "deny", reason: "VERIFICATION_REQUIRED" },
+    },
+    {
+      key: "r4",
+      title: "Self-attest attempt — can't grade its own homework",
+      narration: "Attempting to attest its own test run to unblock the deploy…",
+      trigger: "auto",
+      action: {
+        domain: "ci.pipeline",
+        capability: "release.attest",
+        params: { service: "svc-billing", checksPassed: 128, evidenceHash: "sha256:9f2c41d8a02b77e5c3f0d9a1b64e8c25f7a3d0b19c8e5f2a6d4b7c0e9a1f3d58" },
+      },
+      expect: { decision: "deny", reason: "CAPABILITY_NOT_GRANTED" },
+    },
+    {
+      key: "r5",
+      title: "Verifier agent attests — evidence committed",
+      narration: "Verifier agt_verify_09 submits the attestation, committing to the test-report hash.",
+      trigger: "auto",
+      agent: VERIFIER,
+      action: {
+        domain: "ci.pipeline",
+        capability: "release.attest",
+        params: { service: "svc-billing", checksPassed: 128, evidenceHash: "sha256:9f2c41d8a02b77e5c3f0d9a1b64e8c25f7a3d0b19c8e5f2a6d4b7c0e9a1f3d58" },
+      },
+      expect: { decision: "escalate", reason: "TIER_CAP_EXCEEDED" },
+    },
+    {
+      key: "r5b",
+      title: "Release manager validates the checking",
+      narration: "Awaiting the release manager — validating the evidence, not the code…",
+      trigger: "operator",
+      action: null,
+      resolves: "r5",
+      agent: VERIFIER,
+      expect: { decision: "allow", reason: "HUMAN_APPROVED", linksToStep: "r5" },
+    },
+    {
+      key: "r6",
+      title: "Deploy attempt #2 — the chain now proves the check",
+      narration: "Deploying svc-billing 2.4.1 — work, evidence, independent check, human validation, all in the chain.",
+      trigger: "auto",
+      action: { domain: "release.registry", capability: "release.deploy", params: { service: "svc-billing", version: "2.4.1" } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "r7",
+      title: "Hotfix build — 2.4.2",
+      narration: "Hotfix landed: building svc-billing 2.4.2.",
+      trigger: "auto",
+      action: { domain: "ci.pipeline", capability: "service.build", params: { service: "svc-billing", version: "2.4.2", hotfix: true } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "r8",
+      title: "Smoke tests on the hotfix",
+      narration: "Running smoke tests on 2.4.2: 12/12 pass.",
+      trigger: "auto",
+      action: { domain: "ci.pipeline", capability: "tests.run", params: { service: "svc-billing", suite: "smoke", passed: 12 } },
+      expect: { decision: "allow", reason: "WITHIN_AUTHORITY" },
+    },
+    {
+      key: "r9",
+      title: "Deploy the hotfix — the attestation has rotted",
+      narration: "Deploying 2.4.2 — but the attestation covered 2.4.1; it has aged out of the window.",
+      trigger: "auto",
+      action: { domain: "release.registry", capability: "release.deploy", params: { service: "svc-billing", version: "2.4.2" } },
+      expect: { decision: "deny", reason: "VERIFICATION_REQUIRED" },
+    },
+  ],
+};
+
 /* ── registry + shared invariants ───────────────────────────────────────── */
 
 export const SCENARIOS: readonly ScenarioDef[] = [
@@ -1078,6 +1212,7 @@ export const SCENARIOS: readonly ScenarioDef[] = [
   gridOps,
   defenseLogistics,
   claimsProcessing,
+  releaseEngineering,
 ];
 
 export function getScenario(id: string): ScenarioDef | undefined {
