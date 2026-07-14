@@ -477,7 +477,7 @@ export default function Demo() {
               flies clean, slower than it fell. Every squeeze is provable from the chain; the seed replays the exact run.
             </p>
             <div className="flex flex-wrap gap-1">
-              {["CIRCUIT_BREAKER_OPEN", "TIER_CAP_EXCEEDED", "RATE… every code possible"].map((code) => (
+              {["CIRCUIT_BREAKER_OPEN", "APPROVAL_CEILING_EXCEEDED", "…every reason code"].map((code) => (
                 <span key={code} className="rounded border border-[#30363d] px-1.5 py-0.5 font-mono text-[10px] text-[#8b949e]">
                   {code}
                 </span>
