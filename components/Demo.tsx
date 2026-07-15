@@ -60,6 +60,8 @@ export default function Demo() {
   const [invariantsOk, setInvariantsOk] = useState<boolean | null>(null);
   const [gauntlet, setGauntlet] = useState<GauntletHud | null>(null);
   const [inspected, setInspected] = useState<{ record: DecisionRecord; index: number } | null>(null);
+  const [keyFingerprint, setKeyFingerprint] = useState<string | null>(null);
+  const [anchor, setAnchor] = useState<{ status: "idle" | "working" | "done" | "error"; uuid?: string; logIndex?: number; message?: string }>({ status: "idle" });
   const gauntletPromptRef = useRef<{ subject: string; detail: string }>({ subject: "", detail: "" });
   /** Tap the console (or prefer reduced motion) → narration lands instantly. */
   const skipTypingRef = useRef(false);
@@ -101,6 +103,17 @@ export default function Demo() {
     const data = (await res.json()) as StepResponse;
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     return data;
+  }, []);
+
+  /** SHA-256 fingerprint of the served signing key — computed client-side so
+   *  it always reflects what this browser actually received; pin it against
+   *  the README and the DNS TXT record (out-of-band channels). */
+  const fingerprintKeys = useCallback(async (keys: KeysFile) => {
+    const b64 = Object.values(keys)[0];
+    if (!b64) return;
+    const raw = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    const digest = await crypto.subtle.digest("SHA-256", raw);
+    setKeyFingerprint(Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join(""));
   }, []);
 
   /** Verify in-browser BEFORE rendering the new chain state. */
@@ -145,10 +158,12 @@ export default function Demo() {
       setSecondsLeft(null);
       setErrorMsg(null);
       setInvariantsOk(null);
+      setAnchor({ status: "idle" });
       chainRef.current = null;
 
       try {
         keysRef.current = (await (await fetch("/keys.json")).json()) as KeysFile;
+        void fingerprintKeys(keysRef.current);
 
         // CHAIN-DRIVEN runner: what happens next is derived from the chain the
         // server just signed, never from step indexes — so operator branches
@@ -251,7 +266,7 @@ export default function Demo() {
         setPhase("error");
       }
     },
-    [acceptChain, post, typeNarration, typeCard],
+    [acceptChain, post, typeNarration, typeCard, fingerprintKeys],
   );
 
   /** Gauntlet: seed-derived randomized run. `replayOps` auto-applies operator
@@ -275,6 +290,7 @@ export default function Demo() {
 
       try {
         keysRef.current = (await (await fetch("/keys.json")).json()) as KeysFile;
+        void fingerprintKeys(keysRef.current);
         let ops = "";
         let prevLevel = "NOMINAL";
         let stepNo = 0;
@@ -372,7 +388,7 @@ export default function Demo() {
         setPhase("error");
       }
     },
-    [acceptChain, typeCard],
+    [acceptChain, typeCard, fingerprintKeys],
   );
 
   // deep links: /?seed=XXXX[&ops=ad] auto-starts a gauntlet (replay) run
@@ -600,6 +616,24 @@ export default function Demo() {
             <button onClick={() => download("keys.json", keysRef.current)} className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff]">
               Download keys.json
             </button>
+            <button
+              onClick={async () => {
+                setAnchor({ status: "working" });
+                try {
+                  const res = await fetch("/api/anchor", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chain: chainRef.current }) });
+                  const data = await res.json();
+                  if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+                  setAnchor({ status: "done", uuid: data.uuid, logIndex: data.logIndex });
+                } catch (e) {
+                  setAnchor({ status: "error", message: (e as Error).message });
+                }
+              }}
+              disabled={anchor.status === "working"}
+              className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff] disabled:opacity-50"
+              title="Publish this chain tip to the Sigstore Rekor public transparency log — a third party we don't control timestamps it."
+            >
+              {anchor.status === "working" ? "Anchoring…" : "Anchor tip to public log"}
+            </button>
             {tamperedChain === null ? (
               <button onClick={tamper} className="rounded-lg border border-[#f85149] px-4 py-2 text-sm text-[#f85149] hover:bg-[#f85149]/10">
                 Tamper with record #{tamperIndex === -1 ? 0 : tamperIndex}
@@ -656,6 +690,27 @@ export default function Demo() {
             </a>{" "}
             (works from file:// on an air-gapped machine).
           </p>
+          {anchor.status === "done" && (
+            <p className="mt-2 text-xs text-[#3fb950]">
+              ✓ tip anchored in the Sigstore Rekor public transparency log — entry{" "}
+              <a href={`https://search.sigstore.dev/?uuid=${anchor.uuid}`} target="_blank" rel="noopener" className="underline">
+                {anchor.uuid?.slice(0, 16)}…
+              </a>{" "}
+              (log index {anchor.logIndex}). A third party we don&apos;t control now attests this chain state existed at this moment.
+            </p>
+          )}
+          {anchor.status === "error" && <p className="mt-2 text-xs text-[#f85149]">anchoring failed: {anchor.message}</p>}
+          {keyFingerprint && (
+            <p className="mt-1 text-xs text-[#8b949e]">
+              Signing key fingerprint (computed from what this browser received):{" "}
+              <code className="rounded bg-[#0d1117] px-1.5 py-0.5 font-mono text-[11px]">sha256:{keyFingerprint}</code>{" "}
+              — pin it against the{" "}
+              <a href="https://github.com/vorionsys/basis-demo#key-pinning--dont-take-our-servers-word-for-the-key" target="_blank" rel="noopener" className="text-[#58a6ff] underline">
+                README
+              </a>{" "}
+              and <code className="rounded bg-[#0d1117] px-1 py-0.5 font-mono text-[11px]">TXT basis-demo-key.vorion.org</code>. If they disagree, trust neither.
+            </p>
+          )}
         </footer>
       )}
 

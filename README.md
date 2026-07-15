@@ -40,6 +40,34 @@ Three things to notice while it runs:
 3. **Tamper-evident** — download `chain.json` + `keys.json`, verify offline, then use the
    in-page tamper control and watch verification break at exactly record #3.
 
+## Key pinning — don't take our server's word for the key
+
+`/keys.json` is served by the same server that signs, so on its own it proves
+*integrity, not identity*. Pin the production signing key across channels this
+server can't fake:
+
+| Channel | Value |
+|---|---|
+| kid | `vorion-demo-2026-07` |
+| Ed25519 public key (base64) | `TKTwRU35rdqRuyVJ0RjCLsjLpFMiIhxn2ymCH453KWY=` |
+| SHA-256 fingerprint | `a84a2d6a2e467895447211b2666296de998f10a564f8c7bb34e30c6567ceca92` |
+| DNS (out-of-band) | `TXT basis-demo-key.vorion.org` carries the fingerprint |
+
+If `/keys.json` ever disagrees with this README or the DNS record, trust
+neither — that disagreement is itself the signal.
+
+## Third-party anchoring — facts we can't take back
+
+After any run, **"Anchor tip to public log"** publishes the chain tip into the
+[Sigstore Rekor](https://rekor.sigstore.dev) transparency log — append-only,
+publicly auditable, operated by the OpenSSF, not by us. The entry carries the
+canonical last record, our signature over it, and the pinned public key.
+Validation needs no trust in this server: fetch the entry from Rekor
+(`https://search.sigstore.dev/?uuid=…`), recompute the tip from your downloaded
+chain, compare. The npm packages carry the same class of evidence — every
+release ships with a [Sigstore provenance attestation](https://www.npmjs.com/package/@vorionsys/verify)
+binding the artifact to the exact source commit and CI run that built it.
+
 ## Verify the chain yourself
 
 ```bash

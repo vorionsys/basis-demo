@@ -183,6 +183,80 @@ export function publicKeys(): Record<string, string> {
   return { [signer.kid]: signer.publicKeyBase64 };
 }
 
+/* ── Third-party anchoring (Sigstore Rekor public transparency log) ──────── */
+
+const SPKI_PREFIX = Buffer.from([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]);
+const REKOR = "https://rekor.sigstore.dev";
+
+/** Anchor a verified chain's tip into Rekor — an APPEND-ONLY public log run by
+ *  the OpenSSF/Sigstore project. The entry carries the tip hash, our signature
+ *  over the canonical last record, and the (pinned) public key: a third party
+ *  we don't control now attests that THIS chain state existed at THIS time.
+ *  Verification needs no trust in us: fetch the entry from Rekor, recompute
+ *  the tip hash from the downloaded chain, compare. */
+export async function anchorTip(chainInput: unknown): Promise<{
+  tipHash: string;
+  uuid: string;
+  logIndex: number;
+  integratedTime: number;
+}> {
+  // never anchor what we haven't verified
+  let chain: ChainFile;
+  try {
+    chain = parseChainFile(chainInput);
+  } catch {
+    throw new HttpError(400, "submitted chain does not match the chain-file schema");
+  }
+  if (chain.records.length > MAX_GAUNTLET_RECORDS) throw new HttpError(400, "chain too long");
+  const v = verifyChain(chain, { [KID]: signer.publicKeyBase64 });
+  if (!v.valid) throw new HttpError(409, "only verified chains are anchored");
+
+  const { canonicalize } = await import("@vorionsys/verify");
+  const artifact = Buffer.from(canonicalize(chain.records[chain.records.length - 1]), "utf8");
+  const { createHash } = await import("node:crypto");
+  const tipHex = createHash("sha256").update(artifact).digest("hex");
+
+  const sig = signer.sign(artifact);
+  const pem =
+    "-----BEGIN PUBLIC KEY-----\n" +
+    Buffer.concat([SPKI_PREFIX, Buffer.from(signer.publicKeyBase64, "base64")]).toString("base64") +
+    "\n-----END PUBLIC KEY-----\n";
+
+  // "rekord" with the (small, already-public) canonical last record inlined:
+  // Rekor cannot verify ed25519 from a digest alone (hashedrekord), but CAN
+  // verify it over inline content.
+  const entry = {
+    apiVersion: "0.0.1",
+    kind: "rekord",
+    spec: {
+      data: { content: artifact.toString("base64") },
+      signature: {
+        format: "x509",
+        content: Buffer.from(sig).toString("base64"),
+        publicKey: { content: Buffer.from(pem, "utf8").toString("base64") },
+      },
+    },
+  };
+
+  const res = await fetch(`${REKOR}/api/v1/log/entries`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(entry),
+  });
+  const body = (await res.json().catch(() => ({}))) as Record<string, { logIndex?: number; integratedTime?: number }>;
+  if (res.status === 409) throw new HttpError(409, "this exact tip is already anchored in Rekor");
+  if (!res.ok) throw new HttpError(502, `Rekor refused the entry (HTTP ${res.status})`);
+
+  const uuid = Object.keys(body)[0];
+  const meta = body[uuid] ?? {};
+  return {
+    tipHash: `sha256:${tipHex}`,
+    uuid,
+    logIndex: meta.logIndex ?? -1,
+    integratedTime: meta.integratedTime ?? 0,
+  };
+}
+
 /* ── Gauntlet mode (DESIGN-gauntlet.md) — seed-derived, still stateless ──── */
 
 export interface GauntletResult extends StepResult {
