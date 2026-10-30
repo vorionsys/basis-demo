@@ -175,7 +175,8 @@ for (const [id, o] of Object.entries(ORACLE)) {
   if (sig(chain) !== o.expected.join(",")) {
     die(`${id} sequence mismatch:\nexpected ${o.expected.join(",")}\nactual   ${sig(chain)}`);
   }
-  console.log(`✓ out-of-order · tamper-reject · frozen default path (${chain.records.length} records) · completed-refusal · verifies`);
+  const maxLatency = Math.max(...chain.records.map((r) => r.verdict.latencyMs));
+  console.log(`✓ out-of-order · tamper-reject · frozen default path (${chain.records.length} records) · completed-refusal · verifies · max latencyMs=${maxLatency}`);
 }
 
 // BRANCH TEST: defense-logistics, commander DENIES at the final approval —
@@ -273,6 +274,20 @@ async function runGauntlet(seed, resolveWith = "approve") {
     }
   }
   console.log(`✓ 8-seed sweep verifies · ${breakerSeen} breaker run(s) · ${conflictSeen} emergent approval-conflict(s), each paired with its signed vote`);
+}
+
+{
+  const res = await fetch(`${BASE}/api/anchor`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chain: null }),
+  });
+  const data = await res.json();
+  if (res.status !== 403) die(`anchor: expected 403 while BASIS_DEMO_ANCHOR is unset, got ${res.status}: ${JSON.stringify(data)}`);
+  if (typeof data.error !== "string" || !data.error.includes("BASIS_DEMO_ANCHOR")) {
+    die(`anchor: 403 body did not name the env flag: ${JSON.stringify(data)}`);
+  }
+  console.log("\n✓ public anchoring refused (403) while BASIS_DEMO_ANCHOR is unset");
 }
 
 stopServer();

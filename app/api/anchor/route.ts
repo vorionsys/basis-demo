@@ -1,15 +1,25 @@
 /**
- * POST /api/anchor — anchor a verified chain's tip into the Sigstore Rekor
- * public transparency log (append-only, third-party operated). Returns the
- * Rekor entry UUID + log index; anyone can independently fetch the entry and
- * compare it against the downloaded chain — no trust in this server required.
+ * POST /api/anchor — off unless BASIS_DEMO_ANCHOR=1.
+ * When enabled, posts the full last decision record, its signature, and the
+ * public key to the Sigstore Rekor log (append-only, public, permanent).
+ * Returns the Rekor entry UUID + log index. This route does not call Rekor
+ * while the flag is unset.
  */
 import { NextResponse } from "next/server";
+import { publicAnchorEnabled } from "@/lib/public-anchor";
 import { anchorTip, HttpError } from "@/lib/server-gate";
 
 export const dynamic = "force-dynamic";
 
+const ANCHOR_OFF = {
+  error:
+    "public anchoring is off; set BASIS_DEMO_ANCHOR=1 to enable it. That posts the full last decision record, its signature, and the public key to the public Rekor log.",
+};
+
 export async function POST(req: Request): Promise<NextResponse> {
+  if (!publicAnchorEnabled()) {
+    return NextResponse.json(ANCHOR_OFF, { status: 403 });
+  }
   let body: { chain?: unknown };
   try {
     body = (await req.json()) as { chain?: unknown };
