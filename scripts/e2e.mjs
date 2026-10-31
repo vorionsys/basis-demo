@@ -9,10 +9,66 @@
  * Run after `npm run build`:  node scripts/e2e.mjs   (~40s; honest 15s TTL)
  */
 import { spawn, spawnSync } from "node:child_process";
+import net from "node:net";
 import { verifyChain } from "@vorionsys/verify";
 
 const PORT = 3123;
 const BASE = `http://localhost:${PORT}`;
+
+/** True when something accepts TCP on host:port. */
+function accepts(port, host) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ port, host });
+    let settled = false;
+    const finish = (up) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(up);
+    };
+    socket.setTimeout(300, () => finish(false));
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
+}
+
+/** null when host:port can be bound, otherwise the listen error code. */
+function bindCode(port, host) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", (err) => resolve(err.code || "ERR"));
+    probe.once("listening", () => probe.close(() => resolve(null)));
+    probe.listen({ port, host, ipv6Only: host === "::" });
+  });
+}
+
+/** Refuse to start if the port is taken. A leftover `next start` would otherwise
+ *  answer /keys.json and this run would test that stale server. */
+async function assertPortFree(port) {
+  const taken = (await accepts(port, "127.0.0.1")) || (await accepts(port, "::1"));
+  if (taken) {
+    throw new Error(`port ${port} is already in use — refusing to test a server this run did not start`);
+  }
+  for (const host of ["0.0.0.0", "::"]) {
+    const code = await bindCode(port, host);
+    if (code === "EADDRINUSE") {
+      throw new Error(`port ${port} is already in use — refusing to test a server this run did not start`);
+    }
+  }
+}
+
+function portAcceptsSync(port, host) {
+  const probe = `
+    const net = require("node:net");
+    const s = net.connect({ port: ${Number(port)}, host: ${JSON.stringify(host)} });
+    const done = (code) => { s.destroy(); process.exit(code); };
+    s.setTimeout(250, () => done(1));
+    s.once("connect", () => done(0));
+    s.once("error", () => done(1));
+  `;
+  const result = spawnSync(process.execPath, ["-e", probe], { timeout: 1000 });
+  return result.status === 0;
+}
 
 /** Default-path oracles: action keys + resolution plan + full expected sequence. */
 const ORACLE = {
@@ -71,23 +127,77 @@ const ORACLE = {
   },
 };
 
+try {
+  await assertPortFree(PORT);
+} catch (err) {
+  console.error(`FAIL: ${err.message}`);
+  process.exit(1);
+}
+
+// detached: own session and process group, so the `next start` child of npx
+// is in the same group as the wrapper. Killing the wrapper alone leaves next
+// listening; SIGKILL to -pid tears the group down.
 const server = spawn(process.platform === "win32" ? "npx.cmd" : "npx", ["next", "start", "-p", String(PORT)], {
   cwd: new URL("..", import.meta.url),
   stdio: ["ignore", "pipe", "pipe"],
+  detached: process.platform !== "win32",
   shell: process.platform === "win32",
 });
 let serverOut = "";
 server.stdout.on("data", (d) => (serverOut += d));
 server.stderr.on("data", (d) => (serverOut += d));
-const stopServer = () => {
-  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"]);
-  else server.kill();
-};
+server.on("error", () => {});
+
+let stopResult = null;
+function stopServer() {
+  if (stopResult !== null) return stopResult;
+  stopResult = true;
+  const pid = server.pid;
+  if (!pid) return stopResult;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"]);
+  } else {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already exited */ }
+    }
+  }
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    if (!portAcceptsSync(PORT, "127.0.0.1") && !portAcceptsSync(PORT, "::1")) return stopResult;
+    spawnSync("sleep", ["0.05"]);
+  }
+  console.error(`FAIL: port ${PORT} still accepts connections after killing the server process group`);
+  stopResult = false;
+  return stopResult;
+}
 const die = (msg, code = 1) => {
   console.error(`FAIL: ${msg}`);
   stopServer();
   process.exit(code);
 };
+const shutdownFromSignal = (sig) => {
+  stopServer();
+  const code = sig === "SIGINT" ? 130 : sig === "SIGTERM" ? 143 : 129;
+  process.exit(code);
+};
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => shutdownFromSignal(sig));
+}
+process.on("uncaughtException", (err) => {
+  console.error(err);
+  stopServer();
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  console.error(err);
+  stopServer();
+  process.exit(1);
+});
+process.on("exit", () => {
+  stopServer();
+});
 
 let ready = false;
 for (let i = 0; i < 60; i++) {
@@ -175,7 +285,8 @@ for (const [id, o] of Object.entries(ORACLE)) {
   if (sig(chain) !== o.expected.join(",")) {
     die(`${id} sequence mismatch:\nexpected ${o.expected.join(",")}\nactual   ${sig(chain)}`);
   }
-  console.log(`✓ out-of-order · tamper-reject · frozen default path (${chain.records.length} records) · completed-refusal · verifies`);
+  const maxLatency = Math.max(...chain.records.map((r) => r.verdict.latencyMs));
+  console.log(`✓ out-of-order · tamper-reject · frozen default path (${chain.records.length} records) · completed-refusal · verifies · max latencyMs=${maxLatency}`);
 }
 
 // BRANCH TEST: defense-logistics, commander DENIES at the final approval —
@@ -275,6 +386,20 @@ async function runGauntlet(seed, resolveWith = "approve") {
   console.log(`✓ 8-seed sweep verifies · ${breakerSeen} breaker run(s) · ${conflictSeen} emergent approval-conflict(s), each paired with its signed vote`);
 }
 
-stopServer();
+{
+  const res = await fetch(`${BASE}/api/anchor`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chain: null }),
+  });
+  const data = await res.json();
+  if (res.status !== 403) die(`anchor: expected 403 while BASIS_DEMO_ANCHOR is unset, got ${res.status}: ${JSON.stringify(data)}`);
+  if (typeof data.error !== "string" || !data.error.includes("BASIS_DEMO_ANCHOR")) {
+    die(`anchor: 403 body did not name the env flag: ${JSON.stringify(data)}`);
+  }
+  console.log("\n✓ public anchoring refused (403) while BASIS_DEMO_ANCHOR is unset");
+}
+
+if (!stopServer()) process.exit(1);
 console.log("\nE2E PASS — 9 scenarios + 2 branches + gauntlet");
 process.exit(0);

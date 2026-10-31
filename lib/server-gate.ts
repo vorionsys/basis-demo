@@ -20,6 +20,7 @@ import * as ed from "@noble/ed25519";
 import { effectiveState, GateChain, ed25519Signer, type GateContext, type Signer } from "@vorionsys/gate-core";
 import { verifyChain } from "@vorionsys/verify";
 import { parseChainFile, type ChainFile, type DecisionRecord } from "@vorionsys/contracts/basis";
+import { publicAnchorEnabled } from "@/lib/public-anchor";
 import { getScenario, type ScenarioDef, type ScenarioStep } from "@/lib/scenario";
 import {
   GAUNTLET_BASE_TIER,
@@ -188,18 +189,24 @@ export function publicKeys(): Record<string, string> {
 const SPKI_PREFIX = Buffer.from([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]);
 const REKOR = "https://rekor.sigstore.dev";
 
-/** Anchor a verified chain's tip into Rekor — an APPEND-ONLY public log run by
- *  the OpenSSF/Sigstore project. The entry carries the tip hash, our signature
- *  over the canonical last record, and the (pinned) public key: a third party
- *  we don't control now attests that THIS chain state existed at THIS time.
- *  Verification needs no trust in us: fetch the entry from Rekor, recompute
- *  the tip hash from the downloaded chain, compare. */
+/** Anchor a verified chain into Rekor when BASIS_DEMO_ANCHOR=1.
+ *  The entry is not a hash: `data.content` is the canonical JSON of the full
+ *  last decision record, plus the Ed25519 signature over that JSON and the
+ *  public key. Rekor is an append-only public log, so the write is permanent.
+ *  Records in this demo are synthetic. The route refuses before this runs
+ *  unless the flag is exactly "1"; the check here is the same gate. */
 export async function anchorTip(chainInput: unknown): Promise<{
   tipHash: string;
   uuid: string;
   logIndex: number;
   integratedTime: number;
 }> {
+  if (!publicAnchorEnabled()) {
+    throw new HttpError(
+      403,
+      "public anchoring is off; set BASIS_DEMO_ANCHOR=1 to enable it. That posts the full last decision record, its signature, and the public key to the public Rekor log.",
+    );
+  }
   // never anchor what we haven't verified
   let chain: ChainFile;
   try {
@@ -222,9 +229,9 @@ export async function anchorTip(chainInput: unknown): Promise<{
     Buffer.concat([SPKI_PREFIX, Buffer.from(signer.publicKeyBase64, "base64")]).toString("base64") +
     "\n-----END PUBLIC KEY-----\n";
 
-  // "rekord" with the (small, already-public) canonical last record inlined:
-  // Rekor cannot verify ed25519 from a digest alone (hashedrekord), but CAN
-  // verify it over inline content.
+  // rekord inlines the full canonical last record. Rekor cannot verify
+  // ed25519 from a digest alone (hashedrekord); it checks the signature
+  // over this content. The body is that record, the signature, and the key.
   const entry = {
     apiVersion: "0.0.1",
     kind: "rekord",

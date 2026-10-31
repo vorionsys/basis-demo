@@ -47,7 +47,7 @@ interface StepResponse {
 const STEP_DELAY_MS = 700;
 const TYPE_MS = 18;
 
-export default function Demo() {
+export default function Demo({ anchorEnabled = false }: { anchorEnabled?: boolean }) {
   const [scenario, setScenario] = useState<ScenarioDef | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [cards, setCards] = useState<ConsoleCard[]>([]);
@@ -617,7 +617,9 @@ export default function Demo() {
               Download keys.json
             </button>
             <button
+              type="button"
               onClick={async () => {
+                if (!anchorEnabled) return;
                 setAnchor({ status: "working" });
                 try {
                   const res = await fetch("/api/anchor", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ chain: chainRef.current }) });
@@ -628,9 +630,13 @@ export default function Demo() {
                   setAnchor({ status: "error", message: (e as Error).message });
                 }
               }}
-              disabled={anchor.status === "working"}
-              className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff] disabled:opacity-50"
-              title="Publish this chain tip to the Sigstore Rekor public transparency log — a third party we don't control timestamps it."
+              disabled={!anchorEnabled || anchor.status === "working"}
+              className="rounded-lg border border-[#30363d] px-4 py-2 text-sm hover:border-[#58a6ff] disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                anchorEnabled
+                  ? "Posts the full last decision record, its signature, and the public key to the public Sigstore Rekor log. The write is permanent."
+                  : "Off. Public anchoring posts the full last decision record, its signature, and the public key to Rekor. Set BASIS_DEMO_ANCHOR=1 to enable it."
+              }
             >
               {anchor.status === "working" ? "Anchoring…" : "Anchor tip to public log"}
             </button>
@@ -690,6 +696,13 @@ export default function Demo() {
             </a>{" "}
             (works from file:// on an air-gapped machine).
           </p>
+          {!anchorEnabled && (
+            <p className="mt-2 text-xs text-[#8b949e]">
+              Public anchoring is off. Setting <code className="rounded bg-[#0d1117] px-1 py-0.5">BASIS_DEMO_ANCHOR=1</code> would
+              POST the full last decision record, its signature, and the public key to the Sigstore Rekor log — a permanent
+              public write. Demo records are synthetic.
+            </p>
+          )}
           {anchor.status === "done" && (
             <p className="mt-2 text-xs text-[#3fb950]">
               ✓ tip anchored in the Sigstore Rekor public transparency log — entry{" "}
@@ -704,11 +717,11 @@ export default function Demo() {
             <p className="mt-1 text-xs text-[#8b949e]">
               Signing key fingerprint (computed from what this browser received):{" "}
               <code className="rounded bg-[#0d1117] px-1.5 py-0.5 font-mono text-[11px]">sha256:{keyFingerprint}</code>{" "}
-              — pin it against the{" "}
+              — compare it with the key pin in the{" "}
               <a href="https://github.com/vorionsys/basis-demo#key-pinning--dont-take-our-servers-word-for-the-key" target="_blank" rel="noopener" className="text-[#58a6ff] underline">
                 README
-              </a>{" "}
-              and <code className="rounded bg-[#0d1117] px-1 py-0.5 font-mono text-[11px]">TXT basis-demo-key.vorion.org</code>. If they disagree, trust neither.
+              </a>
+              . If they disagree, trust neither. There is no DNS pin: <code className="rounded bg-[#0d1117] px-1 py-0.5 font-mono text-[11px]">basis-demo-key.vorion.org</code> does not resolve.
             </p>
           )}
         </footer>
