@@ -157,4 +157,4 @@ See [EXPLAINER.md](EXPLAINER.md) for what each record field proves. That note is
 
 ## License
 
-Apache-2.0. Copyright 2026 Vorion Systems.
+Apache-2.0. Copyright 2026 Vorion LLC.
