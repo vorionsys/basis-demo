@@ -5,11 +5,11 @@
 
 **Status.** Nine scripted scenarios, two operator branches, and a seed-derived gauntlet run in this repo; `npm run build && npm run e2e` prints `E2E PASS — 9 scenarios + 2 branches + gauntlet`.
 Public anchoring stays off unless `BASIS_DEMO_ANCHOR` is exactly `1`.
-Open: `npm audit --omit=dev` reports 4 high runtime findings, all from `zod` below 4.6.6 via `@vorionsys/contracts`, `@vorionsys/verify`, and `@vorionsys/gate-core`; npm reports no fix inside the current ranges (see Known issues).
+Open: [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) (`zod` below 4.6.6) stays open until `@vorionsys/contracts` is bumped. `npm audit --omit=dev` reports 4 high runtime findings from that advisory via `@vorionsys/contracts`, `@vorionsys/verify`, and `@vorionsys/gate-core`; npm has no fix inside the current ranges.
 
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-This repository is not what `https://demo.basis.vorion.org` serves. On 2026-10-30 that host returned HTTP 307 to `https://demo.vorion.org/`, whose title is "Vorion Mission Control — live AI-agent governance, across regulated industries". `https://demo.vorion.org/keys.json` returned 404. Run the demo locally.
+This repository is not what `https://demo.basis.vorion.org` serves. That host redirects. Run the demo locally.
 
 ## Nine scenarios, one gate
 
@@ -131,14 +131,14 @@ session. Tamper with it mid-run and the server refuses with the exact failing re
 
 ## Known issues
 
-Runtime, still open. [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5):
+[GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5) is open until `@vorionsys/contracts` is bumped.
 `zod` below 4.6.6 can exhaust memory while validating oversized constrained
 collections. The lockfile has `zod@3.25.76` because `@vorionsys/contracts@1.6.1`
-depends on `zod@^3.24.1`. `npm audit --omit=dev` counts that as 4 high findings
-(`zod`, `@vorionsys/contracts`, `@vorionsys/verify`, `@vorionsys/gate-core`) and
-reports no fix. The patched line is zod 4.6.6 or newer, a major bump this change
-does not take. The `@vorionsys` packages are not modified here. A full `npm audit`
-reports the same 4 findings and no dev-only ones.
+depends on `zod@^3.24.1`, and `@vorionsys/verify` and `@vorionsys/gate-core` depend
+on contracts. `npm audit --omit=dev` counts that as 4 high runtime findings and
+reports no fix. The patched line is zod 4.6.6 or newer. This repo does not bump
+`@vorionsys/contracts` and does not modify the `@vorionsys` packages. A full
+`npm audit` reports the same 4 findings and no dev-only ones.
 
 `next@15.5.28` depended on exact `postcss@8.4.31`. An override to `postcss@8.5.32`
 (still major 8) clears the PostCSS advisories npm had grouped under `postcss` and
